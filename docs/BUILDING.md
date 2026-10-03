@@ -3,7 +3,7 @@
 The port has been built on **Windows 11 from Git Bash**, with portable tools. The scripts are
 plain bash and CMake, so Linux should work with small changes (use the `linux` binaries of the
 OpenOrbis tools), but that has not been tried. The setup is the same as for
-[soh-ps4](https://github.com/alechurri/soh-ps4); one workspace can hold both.
+[shipofharkinian-ps4](https://github.com/alechurri/shipofharkinian-ps4); one workspace can hold both.
 
 ## Workspace layout
 

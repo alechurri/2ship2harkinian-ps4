@@ -5,7 +5,7 @@ An experimental native port of [2 Ship 2 Harkinian](https://github.com/HarbourMa
 consoles. It is built with the [OpenOrbis toolchain](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain)
 and renders through Piglet, Sony's OpenGL ES 2.0 implementation. It is not an emulator.
 
-It is the sibling of [soh-ps4](https://github.com/alechurri/soh-ps4) (Ocarina of Time) and shares
+It is the sibling of [shipofharkinian-ps4](https://github.com/alechurri/shipofharkinian-ps4) (Ocarina of Time) and shares
 its platform layer.
 
 **Download:** the installable package is on the [Releases page](https://github.com/alechurri/2ship2harkinian-ps4/releases).

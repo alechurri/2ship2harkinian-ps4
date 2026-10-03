@@ -2,7 +2,7 @@
 #
 #   cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE=<this file> ...
 #
-# Paths default to the layout of this repo (soh-ps4/tools/...), override with
+# Paths default to the layout of this repo (<workspace>/tools/...), override with
 # -DOO_PS4_TOOLCHAIN=... / -DPS4_LLVM_BIN=... or the matching environment variables.
 
 set(CMAKE_SYSTEM_NAME PS4)

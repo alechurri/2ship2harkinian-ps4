@@ -1,7 +1,7 @@
 # Technical notes
 
 The platform layer (Piglet renderer, EGL setup, DualShock 4 through scePad, sceAudioOut, heap,
-logging) is the one from [soh-ps4](https://github.com/alechurri/soh-ps4/blob/main/docs/TECHNICAL.md),
+logging) is the one from [shipofharkinian-ps4](https://github.com/alechurri/shipofharkinian-ps4/blob/main/docs/TECHNICAL.md),
 carried over to the newer libultraship that 2 Ship 2 Harkinian 5.0.1 uses (`7cb1022`). Read that
 document first; this one covers what was different, and the bugs found on the way.
 

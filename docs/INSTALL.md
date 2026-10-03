@@ -18,7 +18,7 @@ You will end up with these files on the console:
 | `libScePigletv2VSH.sprx` | see step 2 | `/data/self/system/common/lib/` |
 | `libSceShaccVSH.sprx` | see step 2 | `/data/self/system/common/lib/` |
 
-It installs next to the Ocarina of Time port ([soh-ps4](https://github.com/alechurri/soh-ps4)),
+It installs next to the Ocarina of Time port ([shipofharkinian-ps4](https://github.com/alechurri/shipofharkinian-ps4)),
 they don't replace each other. If you already run that one, the two `.sprx` files are already in
 place.
 
