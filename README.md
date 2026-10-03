@@ -8,13 +8,13 @@ and renders through Piglet, Sony's OpenGL ES 2.0 implementation. It is not an em
 It is the sibling of [soh-ps4](https://github.com/alechurri/soh-ps4) (Ocarina of Time) and shares
 its platform layer.
 
-**Download:** the installable package is on the [Releases page](https://github.com/alechurri/2s2h-ps4/releases).
+**Download:** the installable package is on the [Releases page](https://github.com/alechurri/2ship2harkinian-ps4/releases).
 
 Where everything lives:
 
 | Repository | Contents |
 | --- | --- |
-| [alechurri/2s2h-ps4](https://github.com/alechurri/2s2h-ps4) (this one) | Releases, build scripts, CMake toolchain, documentation |
+| [alechurri/2ship2harkinian-ps4](https://github.com/alechurri/2ship2harkinian-ps4) (this one) | Releases, build scripts, CMake toolchain, documentation |
 | [alechurri/2ship2harkinian, branch `ps4`](https://github.com/alechurri/2ship2harkinian/tree/ps4) | 2 Ship 2 Harkinian 5.0.1 with the PS4 changes applied |
 | [alechurri/libultraship, branch `ps4-2s2h`](https://github.com/alechurri/libultraship/tree/ps4-2s2h) | libultraship with the PS4 platform layer and renderer |
 

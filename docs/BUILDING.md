@@ -44,7 +44,7 @@ points at the libultraship fork (branch `ps4-2s2h`), so one recursive clone gets
 ```bash
 cd <workspace>
 git clone --recurse-submodules --branch ps4 https://github.com/alechurri/2ship2harkinian.git
-git clone https://github.com/alechurri/2s2h-ps4.git ps4port
+git clone https://github.com/alechurri/2ship2harkinian-ps4.git ps4port
 ```
 
 Alternatively, the same changes are available as patches against the upstream repositories

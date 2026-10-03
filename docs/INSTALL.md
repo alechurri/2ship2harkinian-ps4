@@ -13,7 +13,7 @@ You will end up with these files on the console:
 
 | File | Where it comes from | Destination on the PS4 |
 | --- | --- | --- |
-| `IV0000-TSHP00001_00-TWOSHIPHARKINIAN.pkg` | [Releases page](https://github.com/alechurri/2s2h-ps4/releases) | installed as a package |
+| `IV0000-TSHP00001_00-TWOSHIPHARKINIAN.pkg` | [Releases page](https://github.com/alechurri/2ship2harkinian-ps4/releases) | installed as a package |
 | `mm.o2r` | generated from your ROM, step 1 | `/data/2ship/` |
 | `libScePigletv2VSH.sprx` | see step 2 | `/data/self/system/common/lib/` |
 | `libSceShaccVSH.sprx` | see step 2 | `/data/self/system/common/lib/` |
