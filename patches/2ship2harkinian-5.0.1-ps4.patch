@@ -1,0 +1,2121 @@
+diff --git a/.gitmodules b/.gitmodules
+index 31171df..77b99c1 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,6 +1,7 @@
+ [submodule "libultraship"]
+ 	path = libultraship
+-	url = https://github.com/kenix3/libultraship.git
++	url = https://github.com/alechurri/libultraship.git
++	branch = ps4-2s2h
+ [submodule "OTRExporter"]
+ 	path = OTRExporter
+ 	url = https://github.com/HarbourMasters/OTRExporter.git
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a9378e8..e18503b 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -168,7 +168,7 @@ target_compile_definitions(libultraship PUBLIC INCLUDE_MPQ_SUPPORT)
+ 
+ # LUS ships no PCH of its own and these headers dominate its build. Done here rather than in the
+ # submodule, and PRIVATE, so nothing about its public interface changes.
+-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU|MSVC")
++if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU|MSVC" AND NOT CMAKE_SYSTEM_NAME STREQUAL "PS4")
+     target_precompile_headers(libultraship PRIVATE
+         "$<$<COMPILE_LANGUAGE:CXX>:<ship/Context.h$<ANGLE-R>>"
+         "$<$<COMPILE_LANGUAGE:CXX>:<ship/resource/ResourceManager.h$<ANGLE-R>>"
+@@ -184,6 +184,11 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU|MSVC")
+     endif()
+ endif()
+ 
++if(CMAKE_SYSTEM_NAME STREQUAL "PS4")
++    # Assets are extracted on a PC; the console build has no extractor and no packaging rules.
++    add_subdirectory(mm)
++    return()
++endif()
+ add_subdirectory(ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
+ add_subdirectory(OTRExporter)
+ add_subdirectory(mm)
+diff --git a/mm/2s2h/BenGui/BenGui.cpp b/mm/2s2h/BenGui/BenGui.cpp
+index e3464f1..eca4088 100644
+--- a/mm/2s2h/BenGui/BenGui.cpp
++++ b/mm/2s2h/BenGui/BenGui.cpp
+@@ -77,6 +77,13 @@ UIWidgets::Colors GetMenuThemeColor() {
+ 
+ void SetupMenu() {
+     auto gui = Ship::Context::GetRawInstance()->GetWindow()->GetGui();
++#ifdef __PS4__
++    // The game is closed from the system menu, often with the port menu still open, and its
++    // open/closed state is saved: don't greet the player with it at the next start.
++    CVarSetInteger("gWindows.Menu", 0);
++    // The DualShock is the only input device: the menu is always navigated with it.
++    CVarSetInteger(CVAR_IMGUI_CONTROLLER_NAV, 1);
++#endif
+     mBenMenu = std::make_shared<BenMenu>("gWindows.Menu", "Settings Menu");
+     gui->SetMenu(mBenMenu);
+ 
+diff --git a/mm/2s2h/BenGui/BenMenu.cpp b/mm/2s2h/BenGui/BenMenu.cpp
+index f568c66..79b1cc1 100644
+--- a/mm/2s2h/BenGui/BenMenu.cpp
++++ b/mm/2s2h/BenGui/BenMenu.cpp
+@@ -372,7 +372,7 @@ void BenMenu::AddSettings() {
+         .CVar("gSettings.Menu.BackgroundOpacity")
+         .Options(FloatSliderOptions().DefaultValue(0.85f).IsPercentage().Tooltip(
+             "Sets the opacity of the background of the port menu."));
+-#if not defined(__SWITCH__) and not defined(__WIIU__)
++#if not defined(__SWITCH__) and not defined(__WIIU__) and not defined(__PS4__)
+     AddWidget(path, "Menu Controller Navigation", WIDGET_CVAR_CHECKBOX)
+         .CVar(CVAR_IMGUI_CONTROLLER_NAV)
+         .Options(CheckboxOptions().Tooltip(
+diff --git a/mm/2s2h/BenGui/Menu.cpp b/mm/2s2h/BenGui/Menu.cpp
+index bdd501c..025166a 100644
+--- a/mm/2s2h/BenGui/Menu.cpp
++++ b/mm/2s2h/BenGui/Menu.cpp
+@@ -739,7 +739,7 @@ void Menu::DrawElement() {
+     options2.tooltip = "Reset"
+ #ifdef __APPLE__
+                        " (Command-R)"
+-#elif !defined(__SWITCH__) && !defined(__WIIU__)
++#elif !defined(__SWITCH__) && !defined(__WIIU__) && !defined(__PS4__)
+                        " (Ctrl+R)"
+ #else
+                        ""
+diff --git a/mm/2s2h/BenGui/ResolutionEditor.cpp b/mm/2s2h/BenGui/ResolutionEditor.cpp
+index 7a55b82..f938d38 100644
+--- a/mm/2s2h/BenGui/ResolutionEditor.cpp
++++ b/mm/2s2h/BenGui/ResolutionEditor.cpp
+@@ -228,7 +228,7 @@ void ResolutionCustomWidget(WidgetInfo& info) {
+     // Collapsible panel for additional settings
+     UIWidgets::PushStyleHeader(THEME_COLOR);
+     if (ImGui::CollapsingHeader("Additional Settings")) {
+-#if defined(__SWITCH__) || defined(__WIIU__)
++#if defined(__SWITCH__) || defined(__WIIU__) || defined(__PS4__)
+         // Disable aspect correction, stretching the framebuffer to fill the viewport.
+         // This option is only really needed on systems limited to 16:9 TV resolutions, such as consoles.
+         // The associated cvar is still functional on PC platforms if you want to use it though.
+diff --git a/mm/2s2h/BenPort.cpp b/mm/2s2h/BenPort.cpp
+index 653de66..19f6fd1 100644
+--- a/mm/2s2h/BenPort.cpp
++++ b/mm/2s2h/BenPort.cpp
+@@ -38,6 +38,10 @@
+ #include <SDL2/SDL_scancode.h>
+ #endif
+ #include "Extractor/Extract.h"
++#ifdef __PS4__
++#include <SDL2/SDL.h>
++#include <ship/port/ps4/Ps4Platform.h>
++#endif
+ // OTRTODO
+ // #include <functions.h>
+ #include "2s2h/Enhancements/FrameInterpolation/FrameInterpolation.h"
+@@ -272,6 +276,78 @@ namespace BenGui {
+ extern std::shared_ptr<BenGui::BenMenu> mBenMenu;
+ }
+ 
++#ifdef __PS4__
++// Console build: there is no ROM extractor here. The archives are generated with the PC release
++// of the same version and copied to the data directory, so all that is left to do at boot is to
++// check that they are there and tell the player what to do when they aren't.
++void OTRGlobals::RunExtract(int argc, char* argv[]) {
++    auto wnd = std::dynamic_pointer_cast<Fast::Fast3dWindow>(OTRGlobals::Instance->context->GetWindow());
++    auto gui = wnd->GetGui();
++
++    const bool outdatedRomArchive = VerifyArchiveVersion(DetectArchiveVersion("mm.o2r", true));
++    const bool haveRomArchive = std::filesystem::exists(Ship::Context::LocateFileAcrossAppDirs("mm.o2r", appShortName));
++    const std::string dataPath = Ship::Context::GetAppDirectoryPath(appShortName);
++    const std::string buildVersion = fmt::format("{}.{}.{}", gBuildVersionMajor, gBuildVersionMinor, gBuildVersionPatch);
++
++    std::string title;
++    std::string message;
++    if (!shipArchiveVersionMatch) {
++        title = !std::filesystem::exists(portArchivePath) ? "Missing 2ship.o2r" : "2ship.o2r is outdated";
++        message = "This build needs the 2ship.o2r of 2 Ship 2 Harkinian " + buildVersion + ".\nCopy it to " +
++                  dataPath + "/ and start the game again.";
++    } else if (outdatedRomArchive) {
++        title = "Outdated ROM Archive";
++        message = "The mm.o2r in " + dataPath +
++                  "/ was created with an incompatible version of 2 Ship 2 Harkinian.\nGenerate it again with the " +
++                  buildVersion + " PC release and copy it over.";
++    } else if (!haveRomArchive) {
++        title = "No ROM Archive";
++        message = "No mm.o2r found.\nGenerate one from your ROM with the 2 Ship 2 Harkinian " + buildVersion +
++                  " PC release and copy it to " + dataPath + "/";
++    } else {
++        CheckAndCreateModFolder();
++        return;
++    }
++
++    SPDLOG_ERROR("{}: {}", title, message);
++    message += "\n\nPress OPTIONS to exit.";
++    BenGui::RegisterPopup(title, message, "OK", "", [&]() { exit(1); });
++
++    // InitControlDeck already attached the pad; open it here to read OPTIONS directly.
++    SDL_GameController* controller = nullptr;
++    for (int i = 0; i < SDL_NumJoysticks() && controller == nullptr; i++) {
++        if (SDL_IsGameController(i)) {
++            controller = SDL_GameControllerOpen(i);
++        }
++    }
++
++    while (true) {
++        if (!WindowIsRunning()) {
++            exit(0);
++        }
++        // Process window events (also updates the controllers)
++        wnd->HandleEvents();
++        if (controller != nullptr && SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_START)) {
++            exit(1);
++        }
++
++        if (!wnd->IsFrameReady()) {
++            continue;
++        }
++
++        UIWidgets::Colors themeColor =
++            static_cast<UIWidgets::Colors>(CVarGetInteger("gSettings.Menu.Theme", UIWidgets::Colors::LightBlue));
++        ImGui::PushStyleColor(ImGuiCol_TitleBgActive, UIWidgets::ColorValues.at(themeColor));
++        ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, UIWidgets::ColorValues.at(UIWidgets::Colors::DarkGray));
++        gui->StartDraw();
++        benFast3dWindow->StartFrame();
++        benFast3dWindow->RunGuiOnly();
++        gui->EndDraw();
++        benFast3dWindow->EndFrame();
++        ImGui::PopStyleColor(2);
++    }
++}
++#else
+ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     bool extractDone = false;
+     ExtractSteps extractStep = ES_PORT_ARCHIVE;
+@@ -608,6 +684,7 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
+     Ship::WiiU::Init(appShortName);
+ #endif
+ }
++#endif // __PS4__
+ 
+ void OTRGlobals::Initialize() {
+     std::string mmPath = Ship::Context::LocateFileAcrossAppDirs("mm.o2r", appShortName);
+@@ -725,7 +802,7 @@ void OTRGlobals::Initialize() {
+     auto versions = context->GetResourceManager()->GetArchiveManager()->GetGameVersions();
+     for (uint32_t version : versions) {
+         if (!validHashes.contains(version)) {
+-#if defined(__SWITCH__)
++#if defined(__SWITCH__) || defined(__PS4__)
+             SPDLOG_ERROR("Invalid O2R File!");
+ #elif defined(__WIIU__)
+             Ship::WiiU::ThrowInvalidOTR();
+@@ -798,6 +875,9 @@ uint32_t OTRGlobals::GetInterpolationFPS() {
+ extern "C" void OTRMessage_Init();
+ extern "C" void AudioMgr_CreateNextAudioBuffer(s16* samples, u32 num_samples);
+ extern "C" void AudioPlayer_Play(const uint8_t* buf, uint32_t len);
++#ifdef __PS4__
++extern "C" void Ps4Audio_TakeStats(uint32_t* droppedBuffers, uint32_t* starvedBlocks);
++#endif
+ extern "C" int AudioPlayer_Buffered(void);
+ extern "C" int AudioPlayer_GetDesiredBuffered(void);
+ extern "C" void ResourceMgr_LoadDirectory(const char* resName);
+@@ -837,14 +917,64 @@ void OTRAudio_Thread() {
+         u32 num_audio_samples = samples_left < AudioPlayer_GetDesiredBuffered() ? SAMPLES_HIGH : SAMPLES_LOW;
+ 
+         // 3 is the maximum authentic frame divisor.
+-        s16 audio_buffer[SAMPLES_HIGH * NUM_AUDIO_CHANNELS * 3];
+-        for (int i = 0; i < AUDIO_FRAMES_PER_UPDATE; i++) {
++        s16 audio_buffer[SAMPLES_HIGH * NUM_AUDIO_CHANNELS * 6];
++        int audio_updates = AUDIO_FRAMES_PER_UPDATE;
++#ifdef __PS4__
++        // 2S2H [PS4] Audio is made once per game frame, so a game running a little under full speed
++        // made less audio than the output plays and the queue ran dry (silent gaps). The N64 ran
++        // its audio on its own clock: follow the queue instead.
++        // The game thread waits for this every frame, so extra updates cost frame time: one when
++        // the queue is below the desired level, as many as needed (at most 6 in all) only when it
++        // is nearly empty.
++        if (samples_left < AudioPlayer_GetDesiredBuffered() / 4) {
++            audio_updates += (AudioPlayer_GetDesiredBuffered() - samples_left + (int)num_audio_samples - 1) /
++                             (int)num_audio_samples;
++            if (audio_updates > 6) {
++                audio_updates = 6;
++            }
++        } else if (samples_left < AudioPlayer_GetDesiredBuffered()) {
++            audio_updates++;
++        } else if (samples_left > AudioPlayer_GetDesiredBuffered() * 3 && audio_updates > 1) {
++            audio_updates--;
++        }
++#endif
++#ifdef __PS4__
++        // 2S2H [PS4] The game thread waits for this every frame: log how long it takes and how full
++        // the output queue was, to tell slow synthesis from a starved output.
++        const auto ps4SynthStart = std::chrono::steady_clock::now();
++#endif
++        for (int i = 0; i < audio_updates; i++) {
+             AudioMgr_CreateNextAudioBuffer(audio_buffer + i * (num_audio_samples * NUM_AUDIO_CHANNELS),
+                                            num_audio_samples);
+         }
++#ifdef __PS4__
++        {
++            static double sTotalMs = 0.0;
++            static double sMaxMs = 0.0;
++            static int sMinQueued = INT32_MAX;
++            static int sUpdates = 0;
++            const double ms =
++                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - ps4SynthStart).count();
++            sTotalMs += ms;
++            sMaxMs = ms > sMaxMs ? ms : sMaxMs;
++            sMinQueued = samples_left < sMinQueued ? samples_left : sMinQueued;
++            if (++sUpdates == 600) {
++                uint32_t dropped = 0;
++                uint32_t starved = 0;
++                Ps4Audio_TakeStats(&dropped, &starved);
++                SPDLOG_INFO("[PS4] audio: synthesis {:.2f} ms avg / {:.2f} ms max per update, queue low point {} "
++                            "frames (beyond the cushion), {} buffers dropped (queue full), {} output blocks starved",
++                            sTotalMs / sUpdates, sMaxMs, sMinQueued, dropped, starved);
++                sTotalMs = 0.0;
++                sMaxMs = 0.0;
++                sMinQueued = INT32_MAX;
++                sUpdates = 0;
++            }
++        }
++#endif
+ 
+         AudioPlayer_Play((u8*)audio_buffer,
+-                         num_audio_samples * (sizeof(int16_t) * NUM_AUDIO_CHANNELS * AUDIO_FRAMES_PER_UPDATE));
++                         num_audio_samples * (sizeof(int16_t) * NUM_AUDIO_CHANNELS * audio_updates));
+ 
+         audio.processing = false;
+         audio.cv_from_thread.notify_one();
+@@ -952,7 +1082,12 @@ ArchiveVersion DetectArchiveVersion(std::string fileName, bool isO2rType) {
+ }
+ 
+ extern "C" void Messagebox_ShowErrorBox(char* title, char* body) {
++#ifdef __PS4__
++    // No native message boxes without the extractor module, the log has to do.
++    SPDLOG_ERROR("{}: {}", title, body);
++#else
+     Extractor::ShowErrorBox(title, body);
++#endif
+ }
+ 
+ bool VerifyArchiveVersion(ArchiveVersion version) {
+@@ -1245,7 +1380,19 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+         count = 1;
+     }
+ 
++#ifdef __PS4__
++    // 2S2H [PS4] Frame time breakdown: game logic (since the previous call), drawing and presenting
++    // (RunCommands, including frame pacing) and waiting for the audio thread.
++    using Ps4Clock = std::chrono::steady_clock;
++    static Ps4Clock::time_point sPs4LastEnd = Ps4Clock::now();
++    static double sPs4Logic = 0, sPs4LogicMax = 0, sPs4Draw = 0, sPs4DrawMax = 0, sPs4Wait = 0, sPs4WaitMax = 0;
++    static int sPs4Frames = 0;
++    const Ps4Clock::time_point ps4DrawStart = Ps4Clock::now();
++#endif
+     RunCommands(commands, start_time, step, next_original_frame, count);
++#ifdef __PS4__
++    const Ps4Clock::time_point ps4DrawEnd = Ps4Clock::now();
++#endif
+ 
+     last_fps = fps;
+     last_update_rate = R_UPDATE_RATE;
+@@ -1256,6 +1403,29 @@ extern "C" void Graph_ProcessGfxCommands(Gfx* commands) {
+             audio.cv_from_thread.wait(Lock);
+         }
+     }
++#ifdef __PS4__
++    {
++        const Ps4Clock::time_point now = Ps4Clock::now();
++        const double logic = std::chrono::duration<double, std::milli>(ps4DrawStart - sPs4LastEnd).count();
++        const double draw = std::chrono::duration<double, std::milli>(ps4DrawEnd - ps4DrawStart).count();
++        const double wait = std::chrono::duration<double, std::milli>(now - ps4DrawEnd).count();
++        sPs4LastEnd = now;
++        sPs4Logic += logic;
++        sPs4Draw += draw;
++        sPs4Wait += wait;
++        sPs4LogicMax = logic > sPs4LogicMax ? logic : sPs4LogicMax;
++        sPs4DrawMax = draw > sPs4DrawMax ? draw : sPs4DrawMax;
++        sPs4WaitMax = wait > sPs4WaitMax ? wait : sPs4WaitMax;
++        if (++sPs4Frames == 600) {
++            SPDLOG_INFO("[PS4] frame time (avg/max ms per game frame, {} presented each): logic {:.1f}/{:.1f}, "
++                        "draw+present {:.1f}/{:.1f}, audio wait {:.1f}/{:.1f}",
++                        count, sPs4Logic / sPs4Frames, sPs4LogicMax, sPs4Draw / sPs4Frames, sPs4DrawMax,
++                        sPs4Wait / sPs4Frames, sPs4WaitMax);
++            sPs4Logic = sPs4LogicMax = sPs4Draw = sPs4DrawMax = sPs4Wait = sPs4WaitMax = 0;
++            sPs4Frames = 0;
++        }
++    }
++#endif
+ 
+     bool curAltAssets = CVarGetInteger("gEnhancements.Mods.AlternateAssets", 0);
+     if (prevAltAssets != curAltAssets) {
+diff --git a/mm/2s2h/SaveManager/SaveManager.cpp b/mm/2s2h/SaveManager/SaveManager.cpp
+index 5331400..de5f7d9 100644
+--- a/mm/2s2h/SaveManager/SaveManager.cpp
++++ b/mm/2s2h/SaveManager/SaveManager.cpp
+@@ -138,9 +138,15 @@ int SaveManager_ReadSaveFile(const std::filesystem::path& fileName, nlohmann::js
+     }
+ 
+     try {
++#ifdef __PS4__
++        SPDLOG_INFO("[PS4] reading save file {}", filePath.string());
++#endif
+         std::ifstream i(filePath);
+         i >> j;
+         i.close();
++#ifdef __PS4__
++        SPDLOG_INFO("[PS4] save file {} parsed", filePath.string());
++#endif
+         return 0;
+     } catch (...) {
+         SPDLOG_ERROR("Failed to read save file");
+diff --git a/mm/2s2h/ShipUtils.cpp b/mm/2s2h/ShipUtils.cpp
+index 1703c0f..1bcb895 100644
+--- a/mm/2s2h/ShipUtils.cpp
++++ b/mm/2s2h/ShipUtils.cpp
+@@ -1,6 +1,7 @@
+ #include "ShipUtils.h"
+ #include "assets/2s2h_assets.h"
+ #include <string>
++#include <sstream>
+ #include <bit>
+ #include <random>
+ #include <vector>
+diff --git a/mm/2s2h/mixer.c b/mm/2s2h/mixer.c
+index 6364fa5..aa4a17b 100644
+--- a/mm/2s2h/mixer.c
++++ b/mm/2s2h/mixer.c
+@@ -6,6 +6,18 @@
+ #include <stdio.h>
+ 
+ #include "mixer.h"
++
++#ifdef __PS4__
++// 2S2H [PS4] Something in the synthesis saved audio state into the game's own globals on PS4
++// (blocks of saturated samples over the audio and sfx variables). Every write the mixer makes to
++// RAM is checked here: a destination that can't be an audio buffer is reported with the caller and
++// skipped.
++int Ps4_IsBadAudioDestination(const void* dest, size_t size, const char* what, void* caller, void* callerOfCaller);
++#define PS4_BAD_AUDIO_DEST(dest, size, what) \
++    Ps4_IsBadAudioDestination((dest), (size), (what), __builtin_return_address(0), __builtin_return_address(1))
++#else
++#define PS4_BAD_AUDIO_DEST(dest, size, what) 0
++#endif
+ #ifndef __clang__
+ #pragma GCC optimize("unroll-loops")
+ #endif
+@@ -18,8 +30,18 @@
+ 
+ //#define DMEM_BUF_SIZE (0x1000 - 0x0330 - 0x10 - 0x40)
+ #define DMEM_BUF_SIZE 0xC80
++#ifdef __PS4__
++// 2S2H [PS4] DMEM addresses are 16 bit, so an out of range one used to reach up to 64 KiB past
++// the emulated DMEM buffer and overwrite whatever globals follow it (on PS4: the audio state and
++// the sfx lists). Out of range accesses go to a scratch area instead, and the first ones are logged
++// with the mixer function and its caller.
++static uint8_t* Ps4DmemPtr(uint32_t addr, const char* function, void* caller, void* callerOfCaller);
++#define BUF_U8(a) Ps4DmemPtr((a), __func__, __builtin_return_address(0), __builtin_return_address(1))
++#define BUF_S16(a) ((int16_t*)BUF_U8((uint32_t)(a) & ~1u))
++#else
+ #define BUF_U8(a) (rspa.buf.as_u8 + ((a)-0x0330))
+ #define BUF_S16(a) (rspa.buf.as_s16 + ((a)-0x0330) / sizeof(int16_t))
++#endif
+ 
+ static struct {
+     uint16_t in;
+@@ -42,8 +64,60 @@ static struct {
+         int16_t as_s16[DMEM_BUF_SIZE / sizeof(int16_t)];
+         uint8_t as_u8[DMEM_BUF_SIZE];
+     } buf;
++#ifdef __PS4__
++    uint64_t ps4Canary[8]; // must stay zero: detects writes running past the end of buf
++#endif
+ } rspa;
+ 
++#ifdef __PS4__
++extern char __text_start;
++#define PS4_DMEM_SCRATCH_SIZE 0x24000
++static uint8_t sPs4DmemScratch[PS4_DMEM_SCRATCH_SIZE] __attribute__((aligned(16)));
++static int sPs4DmemReports = 0;
++
++static uint8_t* Ps4DmemPtr(uint32_t addr, const char* function, void* caller, void* callerOfCaller) {
++    if ((rspa.ps4Canary[0] | rspa.ps4Canary[7]) != 0) {
++        if (sPs4DmemReports < 32) {
++            sPs4DmemReports++;
++            printf("[PS4] DMEM OVERRUN past the end of the buffer, noticed in %s (called from code offset %lx)\n",
++                   function, (unsigned long)((uintptr_t)caller - (uintptr_t)&__text_start));
++            fflush(stdout);
++        }
++        memset(rspa.ps4Canary, 0, sizeof(rspa.ps4Canary));
++    }
++    if (addr >= 0x0330 && addr < 0x0330 + DMEM_BUF_SIZE) {
++        return rspa.buf.as_u8 + (addr - 0x0330);
++    }
++    if (sPs4DmemReports < 32) {
++        sPs4DmemReports++;
++        printf("[PS4] DMEM OUT OF RANGE: %s used DMEM address 0x%X, called from code offset %lx, called from %lx\n",
++               function, addr, (unsigned long)((uintptr_t)caller - (uintptr_t)&__text_start),
++               (unsigned long)((uintptr_t)callerOfCaller - (uintptr_t)&__text_start));
++        fflush(stdout);
++    }
++    return sPs4DmemScratch;
++}
++
++// Sizes given as int can come out of the synthesis negative or huge: keep them inside whatever
++// Ps4DmemPtr hands out for that address.
++static int Ps4DmemSize(uint32_t addr, int nbytes) {
++    int room;
++
++    if (nbytes <= 0) {
++        return 0;
++    }
++    if (addr >= 0x0330 && addr < 0x0330 + DMEM_BUF_SIZE) {
++        room = (int)(0x0330 + DMEM_BUF_SIZE - addr);
++    } else {
++        room = PS4_DMEM_SCRATCH_SIZE;
++    }
++    return nbytes < room ? nbytes : room;
++}
++#define PS4_DMEM_SIZE(addr, nbytes) Ps4DmemSize((addr), (nbytes))
++#else
++#define PS4_DMEM_SIZE(addr, nbytes) (nbytes)
++#endif
++
+ static int16_t resample_table[64][4] = {
+     { 0x0c39, 0x66ad, 0x0d46, 0xffdf }, { 0x0b39, 0x6696, 0x0e5f, 0xffd8 }, { 0x0a44, 0x6669, 0x0f83, 0xffd0 },
+     { 0x095a, 0x6626, 0x10b4, 0xffc8 }, { 0x087d, 0x65cd, 0x11f0, 0xffbf }, { 0x07ab, 0x655e, 0x1338, 0xffb6 },
+@@ -92,6 +166,7 @@ static inline int32_t clamp32(int64_t v) {
+ 
+ void aClearBufferImpl(uint16_t addr, int nbytes) {
+     nbytes = ROUND_UP_16(nbytes);
++    nbytes = PS4_DMEM_SIZE(addr, nbytes);
+     memset(BUF_U8(addr), 0, nbytes);
+ }
+ 
+@@ -101,7 +176,7 @@ void aLoadBufferImpl(const void* source_addr, uint16_t dest_addr, uint16_t nbyte
+         BUF_U8(dest_addr)[i] = ((const unsigned char*)source_addr)[i];
+     }
+ #else
+-    memcpy(BUF_U8(dest_addr), source_addr, ROUND_DOWN_16(nbytes));
++    memcpy(BUF_U8(dest_addr), source_addr, PS4_DMEM_SIZE(dest_addr, ROUND_DOWN_16(nbytes)));
+ #endif
+ }
+ 
+@@ -133,7 +208,10 @@ void aOPUSFree(struct OggOpusFile* opusFile) {
+ }
+ 
+ void aSaveBufferImpl(uint16_t source_addr, int16_t* dest_addr, uint16_t nbytes) {
+-    memcpy(dest_addr, BUF_S16(source_addr), ROUND_DOWN_16(nbytes));
++    if (PS4_BAD_AUDIO_DEST(dest_addr, ROUND_DOWN_16(nbytes), "aSaveBuffer")) {
++        return;
++    }
++    memcpy(dest_addr, BUF_S16(source_addr), PS4_DMEM_SIZE(source_addr, ROUND_DOWN_16(nbytes)));
+ }
+ 
+ void aLoadADPCMImpl(int num_entries_times_16, const int16_t* book_source_addr) {
+@@ -174,6 +252,8 @@ void aInterleaveImpl(uint16_t dest, uint16_t left, uint16_t right, uint16_t c) {
+ 
+ void aDMEMMoveImpl(uint16_t in_addr, uint16_t out_addr, int nbytes) {
+     nbytes = ROUND_UP_16(nbytes);
++    nbytes = PS4_DMEM_SIZE(out_addr, nbytes);
++    nbytes = PS4_DMEM_SIZE(in_addr, nbytes);
+     memmove(BUF_U8(out_addr), BUF_U8(in_addr), nbytes);
+ }
+ 
+@@ -182,6 +262,9 @@ void aSetLoopImpl(ADPCM_STATE* adpcm_loop_state) {
+ }
+ 
+ void aADPCMdecImpl(uint8_t flags, ADPCM_STATE state) {
++    if (PS4_BAD_AUDIO_DEST(state, 16 * sizeof(int16_t), "aADPCMdec state")) {
++        return;
++    }
+     uint8_t* in = BUF_U8(rspa.in);
+     int16_t* out = BUF_S16(rspa.out);
+     int nbytes = ROUND_UP_32(rspa.nbytes);
+@@ -233,6 +316,9 @@ void aADPCMdecImpl(uint8_t flags, ADPCM_STATE state) {
+ }
+ 
+ void aResampleImpl(uint8_t flags, uint16_t pitch, RESAMPLE_STATE state) {
++    if (PS4_BAD_AUDIO_DEST(state, 16 * sizeof(int16_t), "aResample state")) {
++        return;
++    }
+     int16_t tmp[16];
+     int16_t* in_initial = BUF_S16(rspa.in);
+     int16_t* in = in_initial;
+@@ -367,6 +453,9 @@ void aMixImpl(uint16_t count, int16_t gain, uint16_t in_addr, uint16_t out_addr)
+ }
+ 
+ void aS8DecImpl(uint8_t flags, ADPCM_STATE state) {
++    if (PS4_BAD_AUDIO_DEST(state, 16 * sizeof(int16_t), "aS8Dec state")) {
++        return;
++    }
+     uint8_t* in = BUF_U8(rspa.in);
+     int16_t* out = BUF_S16(rspa.out);
+     int nbytes = ROUND_UP_32(rspa.nbytes);
+@@ -514,6 +603,9 @@ void aFilterImpl(uint8_t flags, uint16_t count_or_buf, int16_t* state_or_filter)
+         int16_t tmp[16], tmp2[8];
+         int count = rspa.filter_count;
+         int16_t* buf = BUF_S16(count_or_buf);
++        if (PS4_BAD_AUDIO_DEST(state_or_filter, 16 * sizeof(int16_t), "aFilter state")) {
++            return;
++        }
+ 
+         if (flags == A_INIT) {
+ #ifndef __clang__
+diff --git a/mm/2s2h/port/ps4/Ps4Breadcrumbs.cpp b/mm/2s2h/port/ps4/Ps4Breadcrumbs.cpp
+new file mode 100644
+index 0000000..dafc326
+--- /dev/null
++++ b/mm/2s2h/port/ps4/Ps4Breadcrumbs.cpp
+@@ -0,0 +1,42 @@
++// PS4: progress markers in the log. When the system ends the process without a report (out of
++// memory, GPU fault), the last marker says how far the game got.
++
++#ifdef __PS4__
++
++#include "2s2h/GameInteractor/GameInteractor.h"
++#include "2s2h/ShipInit.hpp"
++
++#include <ship/port/ps4/Ps4Platform.h>
++#include <spdlog/spdlog.h>
++
++namespace {
++bool sSceneFrameLogged = true;
++
++void RegisterPs4Breadcrumbs() {
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnFileSelectSaveLoad>(
++        [](s16 fileNum, bool isOwlSave, SaveContext*) {
++            SPDLOG_INFO("[PS4] file select: save {} loaded{}", fileNum, isOwlSave ? " (owl save)" : "");
++        });
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSaveLoad>(
++        [](s16 fileNum) { SPDLOG_INFO("[PS4] save {} applied", fileNum); });
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnSceneInit>([](s8 sceneId, s8 spawnNum) {
++        SPDLOG_INFO("[PS4] scene {} init (spawn {})", (int)sceneId, (int)spawnNum);
++        Ship::Ps4::LogMemoryStats("at scene init");
++        sSceneFrameLogged = false;
++    });
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnRoomInit>(
++        [](s8 sceneId, s8 roomNum) { SPDLOG_INFO("[PS4] room {} of scene {} init", (int)roomNum, (int)sceneId); });
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnGameStateDrawFinish>([]() {
++        if (!sSceneFrameLogged) {
++            sSceneFrameLogged = true;
++            SPDLOG_INFO("[PS4] first frame of the scene drawn");
++        }
++    });
++    GameInteractor::Instance->RegisterGameHook<GameInteractor::OnPlayDestroy>(
++        []() { SPDLOG_INFO("[PS4] play state destroyed"); });
++}
++
++RegisterShipInitFunc sInit(RegisterPs4Breadcrumbs, {});
++} // namespace
++
++#endif // __PS4__
+diff --git a/mm/2s2h/port/ps4/Ps4Compat.c b/mm/2s2h/port/ps4/Ps4Compat.c
+new file mode 100644
+index 0000000..d82af8a
+--- /dev/null
++++ b/mm/2s2h/port/ps4/Ps4Compat.c
+@@ -0,0 +1,66 @@
++// PS4: runtime bits the OpenOrbis C library doesn't provide.
++
++#ifdef __PS4__
++
++#include <pthread.h>
++#include <stdlib.h>
++
++// libc++abi forwards the registration of thread_local destructors to the C library.
++// This is the usual implementation on top of a pthread key: destructors run when the thread
++// exits, and from an atexit handler for the thread that calls exit().
++
++typedef void (*Ps4ThreadDtor)(void*);
++
++typedef struct Ps4ThreadDtorEntry {
++    Ps4ThreadDtor destructor;
++    void* object;
++    struct Ps4ThreadDtorEntry* next;
++} Ps4ThreadDtorEntry;
++
++static pthread_key_t sDtorKey;
++static pthread_once_t sDtorKeyOnce = PTHREAD_ONCE_INIT;
++
++static void Ps4RunThreadDtors(void* list) {
++    Ps4ThreadDtorEntry* entry = (Ps4ThreadDtorEntry*)list;
++    while (entry != NULL) {
++        Ps4ThreadDtorEntry* next = entry->next;
++        entry->destructor(entry->object);
++        free(entry);
++        entry = next;
++    }
++}
++
++static void Ps4RunExitingThreadDtors(void) {
++    // A destructor may register new ones, keep going until the list stays empty.
++    for (int i = 0; i < 8; i++) {
++        void* list = pthread_getspecific(sDtorKey);
++        if (list == NULL) {
++            break;
++        }
++        pthread_setspecific(sDtorKey, NULL);
++        Ps4RunThreadDtors(list);
++    }
++}
++
++static void Ps4CreateDtorKey(void) {
++    pthread_key_create(&sDtorKey, Ps4RunThreadDtors);
++    atexit(Ps4RunExitingThreadDtors);
++}
++
++int __cxa_thread_atexit_impl(Ps4ThreadDtor destructor, void* object, void* dsoHandle) {
++    (void)dsoHandle;
++
++    pthread_once(&sDtorKeyOnce, Ps4CreateDtorKey);
++
++    Ps4ThreadDtorEntry* entry = (Ps4ThreadDtorEntry*)malloc(sizeof(Ps4ThreadDtorEntry));
++    if (entry == NULL) {
++        return -1;
++    }
++    entry->destructor = destructor;
++    entry->object = object;
++    entry->next = (Ps4ThreadDtorEntry*)pthread_getspecific(sDtorKey);
++    pthread_setspecific(sDtorKey, entry);
++    return 0;
++}
++
++#endif // __PS4__
+diff --git a/mm/2s2h/port/ps4/Ps4Heap.c b/mm/2s2h/port/ps4/Ps4Heap.c
+new file mode 100644
+index 0000000..02349aa
+--- /dev/null
++++ b/mm/2s2h/port/ps4/Ps4Heap.c
+@@ -0,0 +1,266 @@
++// PS4: give the C heap its own big block of memory.
++//
++// The C library (musl) gets all of its heap from anonymous mmap() calls. On PS4 those are served
++// from the application's "flexible memory", a pool of only ~255 MiB that Piglet also keeps its
++// textures in. mmap()/munmap() are therefore replaced here: anonymous read/write mappings are
++// carved out of one arena, everything else is forwarded to the kernel.
++//
++// The arena comes from, in order of preference:
++//  1. system flexible memory (a separate pool this kind of application may map, the same thing
++//     the Super Mario 64 port does), which leaves all of the direct memory to Piglet;
++//  2. direct memory, of which the application only has 768 MiB in total.
++
++#ifdef __PS4__
++
++#include <errno.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/types.h>
++
++#include <orbis/libkernel.h>
++
++#define PS4_PAGE_SIZE 0x4000ULL
++#define PS4_ARENA_ALIGN 0x200000ULL
++#define PS4_SYSTEM_ARENA_SIZE (1024ULL * 1024 * 1024)
++#define PS4_MAP_FIXED 0x10
++
++// Not (properly) declared by the OpenOrbis headers.
++int32_t Ps4Heap_MapNamedSystemFlexibleMemory(void** address, size_t length, int32_t protection, int32_t flags,
++                                             const char* name) __asm__("sceKernelMapNamedSystemFlexibleMemory");
++// Leaves the rest of the direct memory to Piglet (video memory) and the system libraries.
++#define PS4_ARENA_MAX_SIZE (1024ULL * 1024 * 1024)
++#define PS4_ARENA_MIN_SIZE (256ULL * 1024 * 1024)
++// Allocations of at least this many pages (1 MiB) are placed top-down.
++#define PS4_LARGE_PAGES 64
++
++static uint8_t* sArenaBase = NULL;
++static size_t sArenaPages = 0;
++// One byte per page: 0 = free, 1 = in use. Lives in the first pages of the arena itself.
++static uint8_t* sPageMap = NULL;
++static size_t sSearchHint = 0;
++static size_t sPagesInUse = 0;
++static size_t sPagesInUsePeak = 0;
++static int sInitDone = 0;
++// 0 = none, 1 = system flexible memory, 2 = direct memory
++static int sArenaKind = 0;
++static volatile int sLock = 0;
++
++static void Ps4Heap_Lock(void) {
++    while (__sync_lock_test_and_set(&sLock, 1)) {
++        while (sLock) {
++            __builtin_ia32_pause();
++        }
++    }
++}
++
++static void Ps4Heap_Unlock(void) {
++    __sync_lock_release(&sLock);
++}
++
++static void Ps4Heap_Init(void) {
++    sInitDone = 1;
++
++    const size_t directMemorySize = sceKernelGetDirectMemorySize();
++    size_t size = PS4_SYSTEM_ARENA_SIZE;
++
++    {
++        void* address = NULL;
++        if (sceKernelReserveVirtualRange(&address, size, 0, PS4_PAGE_SIZE) == 0 && address != NULL) {
++            if (Ps4Heap_MapNamedSystemFlexibleMemory(&address, size, ORBIS_KERNEL_PROT_CPU_RW, PS4_MAP_FIXED,
++                                                     "2S2H heap") == 0) {
++                sArenaBase = (uint8_t*)address;
++                sArenaKind = 1;
++            } else {
++                sceKernelMunmap(address, size);
++            }
++        }
++    }
++
++    if (sArenaBase == NULL) {
++        size = PS4_ARENA_MAX_SIZE;
++    }
++
++    while (sArenaBase == NULL && size >= PS4_ARENA_MIN_SIZE) {
++        off_t physicalAddress = 0;
++        // Prefer the top of the physical range: Piglet and the system libraries allocate from the
++        // bottom and some of them are picky about where their memory sits.
++        int32_t allocated = -1;
++        if (directMemorySize > size) {
++            allocated = sceKernelAllocateDirectMemory((off_t)(directMemorySize - size), (off_t)directMemorySize, size,
++                                                      PS4_ARENA_ALIGN, ORBIS_KERNEL_WB_ONION, &physicalAddress);
++        }
++        if (allocated != 0) {
++            allocated = sceKernelAllocateDirectMemory(0, (off_t)directMemorySize, size, PS4_ARENA_ALIGN,
++                                                      ORBIS_KERNEL_WB_ONION, &physicalAddress);
++        }
++        if (allocated == 0) {
++            void* address = NULL;
++            if (sceKernelMapDirectMemory(&address, size, ORBIS_KERNEL_PROT_CPU_RW, 0, physicalAddress,
++                                         PS4_ARENA_ALIGN) == 0) {
++                sArenaBase = (uint8_t*)address;
++                sArenaKind = 2;
++                break;
++            }
++            sceKernelReleaseDirectMemory(physicalAddress, size);
++        }
++        size /= 2;
++    }
++
++    if (sArenaBase == NULL) {
++        return;
++    }
++
++    sArenaPages = size / PS4_PAGE_SIZE;
++    const size_t mapPages = (sArenaPages + PS4_PAGE_SIZE - 1) / PS4_PAGE_SIZE;
++    sPageMap = sArenaBase;
++    memset(sPageMap, 0, mapPages * PS4_PAGE_SIZE);
++    memset(sPageMap, 1, mapPages);
++    sSearchHint = mapPages;
++    sPagesInUse = mapPages;
++    sPagesInUsePeak = mapPages;
++}
++
++static void* Ps4Heap_Alloc(size_t length) {
++    const size_t pages = (length + PS4_PAGE_SIZE - 1) / PS4_PAGE_SIZE;
++    void* result = NULL;
++
++    Ps4Heap_Lock();
++
++    if (!sInitDone) {
++        Ps4Heap_Init();
++    }
++
++    if (sArenaBase != NULL && pages != 0 && pages <= sArenaPages) {
++        size_t first = (size_t)-1;
++
++        if (pages >= PS4_LARGE_PAGES) {
++            // Large blocks (textures, archives, the heap extensions themselves) are taken from the
++            // top of the arena so they don't get interleaved with the small short-lived ones.
++            size_t run = 0;
++            for (size_t i = sArenaPages; i-- > 0;) {
++                if (sPageMap[i] != 0) {
++                    run = 0;
++                    continue;
++                }
++                if (++run == pages) {
++                    first = i;
++                    break;
++                }
++            }
++        } else {
++            // Next fit from the bottom: start where the last search ended, wrap around once.
++            for (int pass = 0; pass < 2 && first == (size_t)-1; pass++) {
++                const size_t start = (pass == 0) ? sSearchHint : 0;
++                const size_t end = (pass == 0) ? sArenaPages : sSearchHint + pages;
++                size_t run = 0;
++
++                for (size_t i = start; i < end && i < sArenaPages; i++) {
++                    if (sPageMap[i] != 0) {
++                        run = 0;
++                        continue;
++                    }
++                    if (++run == pages) {
++                        first = i + 1 - pages;
++                        sSearchHint = i + 1;
++                        break;
++                    }
++                }
++            }
++        }
++
++        if (first != (size_t)-1) {
++            memset(sPageMap + first, 1, pages);
++            sPagesInUse += pages;
++            if (sPagesInUse > sPagesInUsePeak) {
++                sPagesInUsePeak = sPagesInUse;
++            }
++            result = sArenaBase + first * PS4_PAGE_SIZE;
++        }
++    }
++
++    Ps4Heap_Unlock();
++
++    if (result != NULL) {
++        // Anonymous mappings are guaranteed to read back as zero (calloc relies on it).
++        memset(result, 0, pages * PS4_PAGE_SIZE);
++    }
++
++    return result;
++}
++
++static int Ps4Heap_Contains(const void* address) {
++    return sArenaBase != NULL && (const uint8_t*)address >= sArenaBase &&
++           (const uint8_t*)address < sArenaBase + sArenaPages * PS4_PAGE_SIZE;
++}
++
++int Ps4Heap_IsInArena(const void* address) {
++    return Ps4Heap_Contains(address);
++}
++
++void* Ps4Heap_GetArenaBase(void) {
++    return sArenaBase;
++}
++
++static void Ps4Heap_Free(void* address, size_t length) {
++    const size_t first = (size_t)((uint8_t*)address - sArenaBase) / PS4_PAGE_SIZE;
++    size_t pages = (length + PS4_PAGE_SIZE - 1) / PS4_PAGE_SIZE;
++
++    Ps4Heap_Lock();
++    if (first + pages > sArenaPages) {
++        pages = sArenaPages - first;
++    }
++    for (size_t i = first; i < first + pages; i++) {
++        if (sPageMap[i] != 0) {
++            sPageMap[i] = 0;
++            sPagesInUse--;
++        }
++    }
++    Ps4Heap_Unlock();
++}
++
++void* mmap(void* address, size_t length, int protection, int flags, int fd, off_t offset) {
++    if (address == NULL && fd == -1 && (flags & MAP_ANON) != 0 && (flags & MAP_FIXED) == 0 &&
++        protection == (PROT_READ | PROT_WRITE)) {
++        void* result = Ps4Heap_Alloc(length);
++        if (result != NULL) {
++            return result;
++        }
++    }
++
++    void* mapped = NULL;
++    const int32_t result = sceKernelMmap(address, length, protection, flags, fd, offset, &mapped);
++    if (result < 0) {
++        errno = ENOMEM;
++        return MAP_FAILED;
++    }
++    return mapped;
++}
++
++int munmap(void* address, size_t length) {
++    if (Ps4Heap_Contains(address)) {
++        Ps4Heap_Free(address, length);
++        return 0;
++    }
++
++    if (sceKernelMunmap(address, length) < 0) {
++        errno = EINVAL;
++        return -1;
++    }
++    return 0;
++}
++
++// 0 = no arena (plain mmap), 1 = system flexible memory, 2 = direct memory
++int Ps4Heap_GetKind(void) {
++    return sArenaKind;
++}
++
++// For the log: how much of the arena is (and was at most) in use, in bytes.
++void Ps4Heap_GetStats(size_t* arenaSize, size_t* inUse, size_t* peak) {
++    *arenaSize = sArenaPages * PS4_PAGE_SIZE;
++    *inUse = sPagesInUse * PS4_PAGE_SIZE;
++    *peak = sPagesInUsePeak * PS4_PAGE_SIZE;
++}
++
++#endif // __PS4__
+diff --git a/mm/2s2h/port/ps4/Ps4Main.cpp b/mm/2s2h/port/ps4/Ps4Main.cpp
+new file mode 100644
+index 0000000..a26f8bc
+--- /dev/null
++++ b/mm/2s2h/port/ps4/Ps4Main.cpp
+@@ -0,0 +1,389 @@
++// PS4 process entry point.
++
++#ifdef __PS4__
++
++#include <errno.h>
++#include <fcntl.h>
++#include <pthread.h>
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#include <orbis/SystemService.h>
++#include <orbis/libkernel.h>
++
++#include <spdlog/spdlog.h>
++#include <ship/port/ps4/Ps4Platform.h>
++
++#include <atomic>
++#include <exception>
++#include <stdexcept>
++#include <string>
++
++extern "C" int ship_main(int argc, char* argv[]);
++// Not declared by the OpenOrbis headers.
++extern "C" int sceKernelInstallExceptionHandler(int signalNumber, void (*handler)(int, void*));
++extern "C" int sceKernelRemoveExceptionHandler(int signalNumber);
++extern "C" int sceKernelRaiseException(pthread_t thread, int signalNumber);
++// From the OpenOrbis linker script.
++extern "C" char __text_start;
++extern "C" char __eh_frame_start;
++extern "C" void Ps4Heap_GetStats(size_t* arenaSize, size_t* inUse, size_t* peak);
++extern "C" int Ps4Heap_IsInArena(const void* address);
++extern "C" void* Ps4Heap_GetArenaBase(void);
++
++namespace {
++// Everything the game reads and writes (ROM archives, saves, config, mods, logs) lives here.
++constexpr const char* kDataDirectory = "/data/2ship";
++// The decompiled game code, the randomizer and std::regex recurse deeper than the default
++// main thread stack is comfortable with.
++constexpr size_t kGameThreadStackSize = 16 * 1024 * 1024;
++
++// The game only opens its log file after the window exists. Until then (and for anything that
++// goes wrong inside the graphics setup) stdout/stderr are the only trace, so they are sent here.
++constexpr const char* kBootLog = "/data/2ship/ps4_boot.log";
++int sBootLogFd = -1;
++
++void BootLogRaw(const char* text) {
++    if (sBootLogFd >= 0) {
++        write(sBootLogFd, text, strlen(text));
++        fsync(sBootLogFd);
++    }
++}
++
++void FatalSignalHandler(int signalNumber, siginfo_t* info, void*) {
++    char line[160];
++    snprintf(line, sizeof(line), "[PS4] FATAL: signal %d, fault address %p\n", signalNumber,
++             info != nullptr ? info->si_addr : nullptr);
++    BootLogRaw(line);
++    signal(signalNumber, SIG_DFL);
++    raise(signalNumber);
++}
++
++// Faults don't reach POSIX signal handlers on this system; the kernel's own exception handler
++// API does. It gets the PS4 ucontext: a 16 byte signal mask and 48 bytes of padding, then a
++// FreeBSD amd64 mcontext. Everything is logged as an offset from the start of the executable's
++// code, which ps4port/symbolize.py turns back into functions with the matching ELF.
++constexpr int kMcontextOffset = 64;
++constexpr int kRipOffset = kMcontextOffset + 160;
++constexpr int kRspOffset = kMcontextOffset + 184;
++constexpr int kRbpOffset = kMcontextOffset + 72;
++constexpr int kAddrOffset = kMcontextOffset + 136;
++// SIGUSR1 in kernel numbering: what sceKernelRaiseException() delivers to another thread.
++constexpr int kHangDumpSignal = 30;
++
++uintptr_t CodeOffset(uintptr_t address) {
++    const uintptr_t start = (uintptr_t)&__text_start;
++    const uintptr_t end = (uintptr_t)&__eh_frame_start;
++    return (address >= start && address < end) ? address - start : 0;
++}
++
++// Highest address of the game thread's stack (approximately: a local of its entry function).
++uintptr_t sGameStackTop = 0;
++
++void LogStackCodeAddresses(const uintptr_t* from, const char* what) {
++    char line[160];
++    snprintf(line, sizeof(line), "[PS4] code addresses on the %s stack (offsets):", what);
++    BootLogRaw(line);
++    // Never read past the top of the game thread's stack: that page isn't mapped.
++    int limit = 1024;
++    if (sGameStackTop > (uintptr_t)from && sGameStackTop - (uintptr_t)from < 0x1000000) {
++        limit = (int)((sGameStackTop - (uintptr_t)from) / sizeof(uintptr_t));
++    }
++    int found = 0;
++    for (int i = 0; i < limit && found < 48; i++) {
++        const uintptr_t offset = CodeOffset(from[i]);
++        if (offset != 0) {
++            snprintf(line, sizeof(line), " %lx", (unsigned long)offset);
++            BootLogRaw(line);
++            found++;
++        }
++    }
++    BootLogRaw("\n");
++}
++
++void KernelExceptionHandler(int signalNumber, void* context) {
++    const bool hangDump = signalNumber == kHangDumpSignal;
++    char line[256];
++    const uint8_t* ctx = static_cast<const uint8_t*>(context);
++    uintptr_t rip = 0;
++    uintptr_t rsp = 0;
++    uintptr_t rbp = 0;
++    uintptr_t addr = 0;
++    if (ctx != nullptr) {
++        memcpy(&rip, ctx + kRipOffset, sizeof(rip));
++        memcpy(&rsp, ctx + kRspOffset, sizeof(rsp));
++        memcpy(&rbp, ctx + kRbpOffset, sizeof(rbp));
++        memcpy(&addr, ctx + kAddrOffset, sizeof(addr));
++    }
++    snprintf(line, sizeof(line),
++             "[PS4] %s: exception %d at rip %p (code offset %lx), fault address %p, rsp %p, rbp %p, text "
++             "start %p\n",
++             hangDump ? "HANG" : "FATAL", signalNumber, (void*)rip, (unsigned long)CodeOffset(rip), (void*)addr, (void*)rsp, (void*)rbp,
++             (void*)&__text_start);
++    BootLogRaw(line);
++    // Walk the frame pointer chain. On the game thread the top of the stack is known; on other
++    // threads (audio...) only follow frames that keep going up in small steps from rsp.
++    const bool onGameStack = sGameStackTop != 0 && rsp != 0 && rsp < sGameStackTop &&
++                             sGameStackTop - rsp < kGameThreadStackSize && (rsp & 7) == 0;
++    const uintptr_t self = (uintptr_t)&rip;
++    const bool onThisStack = rsp != 0 && (rsp & 7) == 0 && rsp > self && rsp - self < 0x10000;
++    if (onGameStack || onThisStack) {
++        const uintptr_t top = onGameStack ? sGameStackTop : rsp + 0x200000;
++        BootLogRaw("[PS4] call chain (offsets):");
++        uintptr_t frame = rbp;
++        for (int depth = 0; depth < 64; depth++) {
++            if (frame < rsp || frame + 16 > top || (frame & 7) != 0) {
++                break;
++            }
++            const uintptr_t* slots = reinterpret_cast<const uintptr_t*>(frame);
++            snprintf(line, sizeof(line), " %lx", (unsigned long)CodeOffset(slots[1]));
++            BootLogRaw(line);
++            if (slots[0] <= frame || slots[0] - frame > 0x20000) {
++                break;
++            }
++            frame = slots[0];
++        }
++        BootLogRaw("\n");
++    }
++    if (onGameStack) {
++        LogStackCodeAddresses(reinterpret_cast<const uintptr_t*>(rsp), "faulting");
++    } else {
++        uintptr_t here = 0;
++        LogStackCodeAddresses(&here, "handler");
++    }
++    if (hangDump) {
++        // Interrupted on purpose by the watchdog: carry on where the thread was.
++        BootLogRaw("[PS4] end of hang report\n");
++        return;
++    }
++    BootLogRaw("[PS4] end of crash report\n");
++    // Let the fault happen again without us, so the system ends the process as usual.
++    sceKernelRemoveExceptionHandler(signalNumber);
++}
++
++// If no frame gets presented for a while, interrupt the game thread so the exception handler
++// logs where it is stuck. A few reports, spaced out, tell a tight loop from a blocked wait.
++pthread_t sGameThread;
++
++void* HangWatchdog(void*) {
++    uint64_t lastCount = 0;
++    int stalledSeconds = 0;
++    int reports = 0;
++    while (reports < 3) {
++        sleep(1);
++        const uint64_t count = Ship::Ps4::GetSwapCount();
++        if (count == 0 || count != lastCount) {
++            lastCount = count;
++            stalledSeconds = 0;
++            continue;
++        }
++        stalledSeconds++;
++        if (stalledSeconds == 6 || stalledSeconds == 12 || stalledSeconds == 20) {
++            char line[160];
++            snprintf(line, sizeof(line), "[PS4] HANG: no frame presented for %d s (frame %llu, %s)\n",
++                     stalledSeconds, (unsigned long long)count,
++                     Ship::Ps4::IsSwapInProgress() ? "inside eglSwapBuffers" : "not swapping");
++            BootLogRaw(line);
++            Ship::Ps4::LogMemoryStats("during the hang");
++            const int result = sceKernelRaiseException(sGameThread, kHangDumpSignal);
++            if (result < 0) {
++                snprintf(line, sizeof(line), "[PS4] sceKernelRaiseException failed: 0x%08X\n", (unsigned int)result);
++                BootLogRaw(line);
++            }
++            reports++;
++        }
++    }
++    return nullptr;
++}
++
++void TerminateHandler() {
++    char line[512];
++    const char* what = "unknown";
++    std::string message;
++    if (std::exception_ptr current = std::current_exception()) {
++        try {
++            std::rethrow_exception(current);
++        } catch (const std::exception& e) {
++            message = e.what();
++            what = message.c_str();
++        } catch (...) {
++        }
++    } else {
++        what = "std::terminate called without an active exception";
++    }
++    snprintf(line, sizeof(line), "[PS4] FATAL: uncaught C++ exception: %s\n", what);
++    BootLogRaw(line);
++    uintptr_t here = 0;
++    LogStackCodeAddresses(&here, "terminate");
++    abort();
++}
++
++// Exceptions go through libunwind's bare-metal mode here; check once that they actually work.
++void CheckExceptions() {
++    bool caught = false;
++    try {
++        throw std::runtime_error("self test");
++    } catch (const std::exception& e) {
++        caught = strcmp(e.what(), "self test") == 0;
++    }
++    BootLogRaw(caught ? "[PS4] C++ exceptions: ok\n" : "[PS4] C++ exceptions: BROKEN\n");
++}
++
++void InstallBootLog() {
++    sBootLogFd = open(kBootLog, O_WRONLY | O_CREAT | O_TRUNC, 0666);
++    if (sBootLogFd >= 0) {
++        // Same descriptor for both streams, so the order of the lines is preserved.
++        dup2(sBootLogFd, STDOUT_FILENO);
++        dup2(sBootLogFd, STDERR_FILENO);
++    }
++    setvbuf(stdout, nullptr, _IONBF, 0);
++    setvbuf(stderr, nullptr, _IONBF, 0);
++
++    spdlog::set_level(spdlog::level::info);
++    spdlog::flush_on(spdlog::level::trace);
++
++    struct sigaction action;
++    memset(&action, 0, sizeof(action));
++    // The OpenOrbis header misspells its own sa_sigaction macro, go through the union.
++    action.__sa_handler.__sa_sigaction = FatalSignalHandler;
++    action.sa_flags = SA_SIGINFO;
++    for (int signalNumber : { SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT }) {
++        sigaction(signalNumber, &action, nullptr);
++    }
++    // Kernel (FreeBSD) signal numbers, not the musl/Linux ones from <signal.h>:
++    // SIGILL, SIGTRAP, SIGABRT, SIGFPE, SIGBUS, SIGSEGV, SIGSYS.
++    for (int signalNumber : { 4, 8, 10, 11, kHangDumpSignal }) {
++        const int result = sceKernelInstallExceptionHandler(signalNumber, KernelExceptionHandler);
++        if (result < 0) {
++            char line[96];
++            snprintf(line, sizeof(line), "[PS4] sceKernelInstallExceptionHandler(%d) failed: 0x%08X\n", signalNumber,
++                     (unsigned int)result);
++            BootLogRaw(line);
++        }
++    }
++    std::set_terminate(TerminateHandler);
++}
++
++// stat() used to report garbage sizes with the stock OpenOrbis headers (see ps4_fixups.h in the
++// build scripts). Compare it against lseek() on a file that is always there, so the log says
++// whether file sizes can be trusted on this console.
++void CheckFileSizes() {
++    const char* path = "/app0/2ship.o2r";
++    struct stat info;
++    memset(&info, 0, sizeof(info));
++    const int statResult = stat(path, &info);
++    long long seekSize = -1;
++    const int fd = open(path, O_RDONLY);
++    if (fd >= 0) {
++        seekSize = (long long)lseek(fd, 0, SEEK_END);
++        close(fd);
++    }
++    char line[200];
++    snprintf(line, sizeof(line), "[PS4] file size check on %s: stat %s, st_size %lld, lseek %lld -> %s\n", path,
++             statResult == 0 ? "ok" : "failed", (long long)info.st_size, seekSize,
++             (statResult == 0 && (long long)info.st_size == seekSize) ? "consistent" : "MISMATCH");
++    BootLogRaw(line);
++}
++
++} // namespace
++
++// Called by the audio mixer before every write to RAM (see 2s2h/mixer.c).
++extern "C" int Ps4_IsBadAudioDestination(const void* dest, size_t size, const char* what, void* caller,
++                                         void* callerOfCaller) {
++    const uintptr_t address = (uintptr_t)dest;
++    // Audio buffers live in the heap arena or on a thread stack, both far above 4 GiB; the
++    // executable and its globals sit below.
++    if (address >= 0x100000000ull || Ps4Heap_IsInArena(dest)) {
++        return 0;
++    }
++    static std::atomic<int> sReports{ 0 };
++    if (sReports.fetch_add(1) < 24) {
++        char line[256];
++        snprintf(line, sizeof(line),
++                 "[PS4] BAD AUDIO WRITE: %s to %p (%zu bytes, image offset %lx), called from code offset %lx, "
++                 "called from %lx\n",
++                 what, dest, size, (unsigned long)(address - (uintptr_t)&__text_start),
++                 (unsigned long)CodeOffset((uintptr_t)caller), (unsigned long)CodeOffset((uintptr_t)callerOfCaller));
++        BootLogRaw(line);
++    }
++    return 1;
++}
++
++namespace {
++
++void* GameThread(void*) {
++    uintptr_t top = 0;
++    // Not past this frame: the page above the top of the stack is not mapped.
++    sGameStackTop = (uintptr_t)&top;
++    BootLogRaw("[PS4] game thread started\n");
++    {
++        char line[96];
++        snprintf(line, sizeof(line), "[PS4] heap arena at %p, text at %p\n", Ps4Heap_GetArenaBase(),
++                 (void*)&__text_start);
++        BootLogRaw(line);
++    }
++    static char arg0[] = "2ship";
++    char* argv[] = { arg0, nullptr };
++    ship_main(1, argv);
++    BootLogRaw("[PS4] ship_main returned\n");
++    return nullptr;
++}
++
++void ReturnToSystem() {
++    size_t arenaSize = 0;
++    size_t inUse = 0;
++    size_t peak = 0;
++    Ps4Heap_GetStats(&arenaSize, &inUse, &peak);
++    printf("[PS4] heap arena %zu MiB, in use %zu MiB, peak %zu MiB\n", arenaSize >> 20, inUse >> 20, peak >> 20);
++    fflush(stdout);
++
++    // The orderly way for an application to quit back to the home screen.
++    sceSystemServiceLoadExec("exit", nullptr);
++}
++} // namespace
++
++int main(int argc, char* argv[]) {
++    if (mkdir(kDataDirectory, 0777) != 0 && errno != EEXIST) {
++        printf("[PS4] could not create %s: %s\n", kDataDirectory, strerror(errno));
++    }
++    if (chdir(kDataDirectory) != 0) {
++        printf("[PS4] could not change directory to %s: %s\n", kDataDirectory, strerror(errno));
++    }
++
++    InstallBootLog();
++    BootLogRaw("[PS4] 2 Ship 2 Harkinian boot\n");
++    CheckFileSizes();
++    CheckExceptions();
++
++    atexit(ReturnToSystem);
++
++    pthread_attr_t attributes;
++    pthread_attr_init(&attributes);
++    pthread_attr_setstacksize(&attributes, kGameThreadStackSize);
++
++    pthread_t thread;
++    const int result = pthread_create(&thread, &attributes, GameThread, nullptr);
++    pthread_attr_destroy(&attributes);
++    if (result == 0) {
++        sGameThread = thread;
++        pthread_t watchdog;
++        if (pthread_create(&watchdog, nullptr, HangWatchdog, nullptr) == 0) {
++            pthread_detach(watchdog);
++        }
++    }
++
++    if (result != 0) {
++        printf("[PS4] could not create the game thread (%d), running on the main thread\n", result);
++        GameThread(nullptr);
++    } else {
++        pthread_join(thread, nullptr);
++    }
++
++    return 0;
++}
++
++#endif // __PS4__
+diff --git a/mm/2s2h/resource/importer/AudioSampleFactory.cpp b/mm/2s2h/resource/importer/AudioSampleFactory.cpp
+index 8948a67..d9d2e33 100644
+--- a/mm/2s2h/resource/importer/AudioSampleFactory.cpp
++++ b/mm/2s2h/resource/importer/AudioSampleFactory.cpp
+@@ -190,6 +190,40 @@ static void OggDecoderWorker(std::shared_ptr<SOH::AudioSample> audioSample, std:
+     }
+ }
+ 
++// 2S2H [Port] Majora's Mask keeps the total number of samples of the clip at offset 0x0C of the loop
++// (`sampleEnd`, read by the synthesis for loops with a count of 2, once the note is released). The
++// archive doesn't carry it, so it used to be whatever was left in memory: on PS4 that meant notes
++// "playing" far past the end of their data and the mixer writing outside its DMEM buffer.
++// Rebuild it from the sample data instead.
++static void SetSampleEnd(SOH::AudioSample* audioSample, bool fromSampleData) {
++    uint32_t end = audioSample->loop.end;
++
++    if (fromSampleData) {
++        const uint32_t size = audioSample->sample.size;
++        switch (audioSample->sample.codec) {
++            case CODEC_ADPCM: // 9 bytes per 16 samples
++                end = (size / 9) * 16;
++                break;
++            case CODEC_SMALL_ADPCM: // 5 bytes per 16 samples
++                end = (size / 5) * 16;
++                break;
++            case CODEC_S8:
++                end = size;
++                break;
++            case CODEC_S16:
++            case CODEC_S16_INMEMORY:
++                end = size / 2;
++                break;
++            default:
++                break;
++        }
++        if (end < audioSample->loop.end) {
++            end = audioSample->loop.end;
++        }
++    }
++    memcpy(audioSample->loop.unk_0C, &end, sizeof(end));
++}
++
+ namespace SOH {
+ std::shared_ptr<Ship::IResource>
+ ResourceFactoryBinaryAudioSampleV2::ReadResource(std::shared_ptr<Ship::File> file,
+@@ -236,6 +270,7 @@ ResourceFactoryBinaryAudioSampleV2::ReadResource(std::shared_ptr<Ship::File> fil
+         audioSample->book.book[i] = reader->ReadInt16();
+     }
+     audioSample->sample.book = &audioSample->book;
++    SetSampleEnd(audioSample.get(), true);
+ 
+     return audioSample;
+ }
+@@ -309,16 +344,20 @@ ResourceFactoryXMLAudioSampleV0::ReadResource(std::shared_ptr<Ship::File> file,
+             audioSample->sample.sampleAddr = new uint8_t[numFrames * wav.channels * 2];
+ 
+             drwav_read_pcm_frames_s16(&wav, numFrames, (int16_t*)audioSample->sample.sampleAddr);
++            SetSampleEnd(audioSample.get(), false);
+             return audioSample;
+         } else if (strcmp(customFormatStr, "mp3") == 0) {
++            SetSampleEnd(audioSample.get(), false);
+             std::thread fileDecoderThread = std::thread(Mp3DecoderWorker, audioSample, sampleFile);
+             fileDecoderThread.detach();
+             return audioSample;
+         } else if (strcmp(customFormatStr, "ogg") == 0) {
++            SetSampleEnd(audioSample.get(), false);
+             std::thread fileDecoderThread = std::thread(OggDecoderWorker, audioSample, sampleFile, initData);
+             fileDecoderThread.detach();
+             return audioSample;
+         } else if (strcmp(customFormatStr, "flac") == 0) {
++            SetSampleEnd(audioSample.get(), false);
+             std::thread fileDecoderThread = std::thread(FlacDecoderWorker, audioSample, sampleFile);
+             fileDecoderThread.detach();
+             return audioSample;
+@@ -330,6 +369,7 @@ ResourceFactoryXMLAudioSampleV0::ReadResource(std::shared_ptr<Ship::File> file,
+     for (uint32_t i = 0; i < size; i++) {
+         audioSample->sample.sampleAddr[i] = sampleFile->Buffer.get()->data()[i];
+     }
++    SetSampleEnd(audioSample.get(), true);
+ 
+     return audioSample;
+ }
+diff --git a/mm/2s2h/resource/type/AudioSample.h b/mm/2s2h/resource/type/AudioSample.h
+index a3b24f7..391ec2b 100644
+--- a/mm/2s2h/resource/type/AudioSample.h
++++ b/mm/2s2h/resource/type/AudioSample.h
+@@ -9,7 +9,7 @@ typedef struct {
+     /* 0x00 */ u32 start;
+     /* 0x04 */ u32 end;
+     /* 0x08 */ u32 count;
+-    /* 0x0C */ char unk_0C[0x4];
++    /* 0x0C */ char unk_0C[0x4]; // sampleEnd in Majora's Mask, see SetSampleEnd in AudioSampleFactory.cpp
+     /* 0x10 */ s16 state[16]; // only exists if count != 0. 8-byte aligned
+ } AdpcmLoop;                  // size = 0x30 (or 0x10)
+ 
+@@ -51,9 +51,10 @@ class AudioSample : public Ship::Resource<Sample> {
+     Sample* GetPointer();
+     size_t GetPointerSize();
+ 
+-    Sample sample;
+-    AdpcmLoop loop;
+-    AdpcmBook book;
++    // Value-initialized: the factories don't fill every field, and the audio engine reads them all.
++    Sample sample{};
++    AdpcmLoop loop{};
++    AdpcmBook book{};
+     // Only applies to streamed audio
+     float tuning = -1.0f;
+ };
+diff --git a/mm/2s2h/resource/type/AudioSoundFont.h b/mm/2s2h/resource/type/AudioSoundFont.h
+index eebbd3e..5447eb2 100644
+--- a/mm/2s2h/resource/type/AudioSoundFont.h
++++ b/mm/2s2h/resource/type/AudioSoundFont.h
+@@ -76,6 +76,6 @@ class AudioSoundFont : public Ship::Resource<SoundFont> {
+ 
+     std::vector<SoundFontSound> soundEffects;
+ 
+-    SoundFont soundFont;
++    SoundFont soundFont{};
+ };
+ }; // namespace SOH
+diff --git a/mm/CMakeLists.txt b/mm/CMakeLists.txt
+index d9f7f09..cacdc37 100644
+--- a/mm/CMakeLists.txt
++++ b/mm/CMakeLists.txt
+@@ -68,7 +68,7 @@ if (NOT TARGET libultraship)
+     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libultraship ${CMAKE_BINARY_DIR}/libultraship)
+ endif()
+ 
+-if (NOT TARGET ZAPDLib)
++if (NOT TARGET ZAPDLib AND NOT CMAKE_SYSTEM_NAME STREQUAL "PS4")
+     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../ZAPDTR/ZAPD ${CMAKE_BINARY_DIR}/ZAPD)
+ endif()
+ 
+@@ -112,8 +112,11 @@ if (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+ endif()
+ 
+ list(FILTER ship__ EXCLUDE REGEX "2s2h/Extractor/*")
++if(NOT CMAKE_SYSTEM_NAME STREQUAL "PS4")
++    list(FILTER ship__ EXCLUDE REGEX "2s2h/port/ps4/")
++endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS|PS4")
+     file(GLOB_RECURSE ship__Extractor RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
+         "2s2h/Extractor/*.c"
+         "2s2h/Extractor/*.cpp"
+@@ -378,6 +381,30 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+         target_link_options(${PROJECT_NAME} PRIVATE
+             -pthread
+         )
++    elseif (CMAKE_SYSTEM_NAME STREQUAL "PS4")
++        target_compile_options(${PROJECT_NAME} PRIVATE
++            -Wall -Wextra -Wno-error
++            -Wformat-security
++            -Wno-return-type
++            -Wno-unused-parameter
++            -Wno-unused-function
++            -Wno-unused-variable
++            -Wno-missing-field-initializers
++            -Wno-parentheses
++            -Wno-narrowing
++            -Wno-missing-braces
++            $<$<COMPILE_LANGUAGE:C>:
++                -Wno-ignored-qualifiers
++                -Wno-implicit-int
++                -Wno-incompatible-pointer-types
++                -Wno-int-conversion
++            >
++            $<$<COMPILE_LANGUAGE:CXX>:
++                -Wno-c++11-narrowing
++                -Wno-deprecated-enum-enum-conversion
++            >
++            -msse2 -mfpmath=sse
++        )
+     elseif (CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+         target_compile_options(${PROJECT_NAME} PRIVATE
+             -Wall -Wextra -Wno-error
+@@ -518,7 +545,7 @@ endif()
+ if (CMAKE_GENERATOR MATCHES "Visual Studio")
+     set(VS_COPY_ASSETS_CMD ${CMAKE_COMMAND} -E copy_directory_if_different $<TARGET_FILE_DIR:2ship>/assets ${CMAKE_BINARY_DIR}/mm/assets)
+ endif()
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS|PS4")
+     add_custom_command(
+         TARGET ${PROJECT_NAME}
+         POST_BUILD
+@@ -535,7 +562,7 @@ endif()
+ add_dependencies(${PROJECT_NAME}
+     libultraship
+ )
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS|PS4")
+ add_dependencies(${PROJECT_NAME}
+     ZAPDLib
+ )
+@@ -573,6 +600,24 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+         "Vorbis::vorbisfile"
+ 		"OpusFile::opusfile"
+ 	)
++elseif(CMAKE_SYSTEM_NAME STREQUAL "PS4")
++    find_package(SDL2 REQUIRED CONFIG)
++    find_package(Ogg REQUIRED)
++    find_package(Vorbis REQUIRED)
++    find_package(Opus REQUIRED)
++    find_package(OpusFile REQUIRED)
++    find_package(PNG REQUIRED)
++    set(ADDITIONAL_LIBRARY_DEPENDENCIES
++        "libultraship;"
++        SDL2::SDL2-static
++        PNG::PNG
++        "Opusfile::Opusfile"
++        "Vorbis::vorbisfile"
++        "Vorbis::vorbisenc"
++        "Vorbis::vorbis"
++        "Opus::opus"
++        "Ogg::ogg"
++    )
+ elseif(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+     find_package(SDL2)
+     set(THREADS_PREFER_PTHREAD_FLAG ON)
+@@ -620,7 +665,7 @@ else()
+ 
+ endif()
+ 
+-if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|NintendoSwitch|CafeOS")
++if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|NintendoSwitch|CafeOS|PS4")
+ INSTALL(TARGETS 2ship DESTINATION . COMPONENT 2s2h)
+ endif()
+ 
+@@ -637,7 +682,7 @@ configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/macosx/Info.plist.in ${CMAKE_BINARY_
+ INSTALL(TARGETS 2ship DESTINATION ../MacOS COMPONENT 2s2h)
+ INSTALL(FILES ${CMAKE_BINARY_DIR}/gamecontrollerdb.txt DESTINATION ../MacOS COMPONENT 2s2h)
+ INSTALL(FILES ${CMAKE_BINARY_DIR}/mm/2ship.o2r DESTINATION ../Resources COMPONENT 2s2h)
+-elseif(NOT "${CMAKE_SYSTEM_NAME}" MATCHES "NintendoSwitch|CafeOS")
++elseif(NOT "${CMAKE_SYSTEM_NAME}" MATCHES "NintendoSwitch|CafeOS|PS4")
+ INSTALL(FILES ${CMAKE_BINARY_DIR}/gamecontrollerdb.txt DESTINATION . COMPONENT 2s2h)
+ endif()
+ 
+diff --git a/mm/src/audio/lib/load.c b/mm/src/audio/lib/load.c
+index 6e3b1b9..f57f372 100644
+--- a/mm/src/audio/lib/load.c
++++ b/mm/src/audio/lib/load.c
+@@ -1937,17 +1937,20 @@ s32 AudioLoad_ProcessSamplePreloads(s32 resetStatus) {
+     s32 pad;
+ 
+     if (gAudioCtx.preloadSampleStackTop > 0) {
++        // 2S2H [Port] Receive into a whole OSMesg, it is wider than preloadIndex
++        OSMesg preloadMsg;
+         if (resetStatus != 0) {
+             // Clear result queue and preload stack and return.
+-            osRecvMesg(&gAudioCtx.preloadSampleQueue, (OSMesg*)&preloadIndex, OS_MESG_NOBLOCK);
++            osRecvMesg(&gAudioCtx.preloadSampleQueue, &preloadMsg, OS_MESG_NOBLOCK);
+             gAudioCtx.preloadSampleStackTop = 0;
+             return false;
+         }
+-        if (osRecvMesg(&gAudioCtx.preloadSampleQueue, (OSMesg*)&preloadIndex, OS_MESG_NOBLOCK) == -1) {
++        if (osRecvMesg(&gAudioCtx.preloadSampleQueue, &preloadMsg, OS_MESG_NOBLOCK) == -1) {
+             // Previous preload is not done yet.
+             return false;
+         }
+ 
++        preloadIndex = preloadMsg.data32;
+         preloadIndex >>= 24;
+         preload = &gAudioCtx.preloadSampleStack[preloadIndex];
+ 
+@@ -2234,11 +2237,72 @@ void AudioLoad_Unused4(void) {
+ void AudioLoad_Unused5(void) {
+ }
+ 
++#ifdef __PS4__
++// 2S2H [PS4] On PS4 the script load queue was found corrupted (messages pending, no buffer) and the
++// game crashed on the next receive. Check it at every stage of the audio frame: the first time it
++// breaks, log where, with a dump of the surrounding globals, then repair it instead of crashing.
++static s32 sPs4ScriptLoadReports = 0;
++
++static void AudioLoad_Ps4DumpScriptLoads(const char* where, u32 loadIndex) {
++    const u8* start = (const u8*)seqCachePolicyMap;
++    const u8* end = (const u8*)sScriptLoadMesgBuf + sizeof(sScriptLoadMesgBuf);
++    const u8* p;
++    s32 i;
++
++    if (sPs4ScriptLoadReports >= 4) {
++        return;
++    }
++    sPs4ScriptLoadReports++;
++    printf("[PS4] AUDIO CORRUPTION at %s (audio frame %u, load index %u): queue valid %d first %d count %d msg %p, "
++           "buffer %p\n",
++           where, (u32)gAudioCtx.totalTaskCount, loadIndex, (s32)sScriptLoadQueue.validCount,
++           (s32)sScriptLoadQueue.first, (s32)sScriptLoadQueue.msgCount, (void*)sScriptLoadQueue.msg,
++           (void*)sScriptLoadMesgBuf);
++    for (p = start; p < end; p += 16) {
++        printf("[PS4]   %p:", (const void*)p);
++        for (i = 0; i < 16 && p + i < end; i++) {
++            printf(" %02X", p[i]);
++        }
++        printf("\n");
++    }
++    fflush(stdout);
++}
++
++void AudioLoad_Ps4CheckScriptLoads(const char* where) {
++    OSMesgQueue* queue = &sScriptLoadQueue;
++
++    if (queue->msg == NULL && queue->msgCount == 0 && queue->validCount == 0) {
++        // Not created yet: the audio heap is still being set up.
++        return;
++    }
++    if (queue->msg == sScriptLoadMesgBuf && queue->msgCount == ARRAY_COUNT(sScriptLoadMesgBuf) &&
++        queue->first >= 0 && queue->first < queue->msgCount && queue->validCount >= 0 &&
++        queue->validCount <= queue->msgCount) {
++        return;
++    }
++    AudioLoad_Ps4DumpScriptLoads(where, 0xFFFFFFFF);
++    osCreateMesgQueue(queue, sScriptLoadMesgBuf, ARRAY_COUNT(sScriptLoadMesgBuf));
++}
++#endif
++
+ void AudioLoad_ScriptLoad(s32 tableType, s32 id, s8* isDone) {
+     static u32 sLoadIndex = 0;
+ 
++#ifdef __PS4__
++    if (sLoadIndex >= ARRAY_COUNT(sScriptLoadDonePointers)) {
++        AudioLoad_Ps4DumpScriptLoads("script load index", sLoadIndex);
++        sLoadIndex = 0;
++    }
++#endif
++
+     sScriptLoadDonePointers[sLoadIndex] = isDone;
+     AudioLoad_AsyncLoad(tableType, id, 0, sLoadIndex, &sScriptLoadQueue);
++#ifdef __PS4__
++    {
++        void AudioSfx_Ps4CheckUnchanged(const char* where);
++        AudioSfx_Ps4CheckUnchanged("AudioLoad_ScriptLoad");
++    }
++#endif
+     sLoadIndex++;
+     if (sLoadIndex == 0x10) {
+         sLoadIndex = 0;
+@@ -2250,11 +2314,22 @@ void AudioLoad_ProcessScriptLoads(void) {
+     u32 sp20;
+     s8* isDone;
+ 
+-    if (osRecvMesg(&sScriptLoadQueue, (OSMesg*)&sp20, OS_MESG_NOBLOCK) != -1) {
++    // 2S2H [Port] Receive into a whole OSMesg, it is wider than sp20
++    OSMesg msg;
++
++#ifdef __PS4__
++    AudioLoad_Ps4CheckScriptLoads("ProcessScriptLoads");
++#endif
++    if (osRecvMesg(&sScriptLoadQueue, &msg, OS_MESG_NOBLOCK) != -1) {
++        sp20 = msg.data32;
+         temp = sp20 >> 24;
+-        isDone = sScriptLoadDonePointers[temp];
+-        if (isDone != NULL) {
+-            *isDone = false;
++        // 2S2H [Port] A failed load reports 0xFFFFFFFF: index 0xFF is far outside the array, and the
++        // original code would write a zero byte through whatever pointer it found there.
++        if (temp < ARRAY_COUNT(sScriptLoadDonePointers)) {
++            isDone = sScriptLoadDonePointers[temp];
++            if (isDone != NULL) {
++                *isDone = false;
++            }
+         }
+     }
+ }
+diff --git a/mm/src/audio/lib/playback.c b/mm/src/audio/lib/playback.c
+index a349540..313c34a 100644
+--- a/mm/src/audio/lib/playback.c
++++ b/mm/src/audio/lib/playback.c
+@@ -196,7 +196,9 @@ void AudioPlayback_ProcessNotes(void) {
+         sampleState = &gAudioCtx.sampleStateList[gAudioCtx.sampleStateOffset + i];
+         playbackState = &note->playbackState;
+         if (playbackState->parentLayer != NO_LAYER) {
+-#ifndef __WIIU__
++// 2S2H [PS4] The executable (and gAudioCtx, where the sequence layers live) is loaded below 2 GiB on PS4,
++// so this check skipped every note there: no volume, pitch or sample state updates.
++#if !defined(__WIIU__) && !defined(__PS4__)
+             // OTRTODO: This skips playback if the pointer is below where memory on the N64 normally would be.
+             // This does not translate well to modern platforms and how they map memory.
+             // Considering that this check is not present in OoT/SoH, we may be able to remove this altogether.
+diff --git a/mm/src/audio/lib/synthesis.c b/mm/src/audio/lib/synthesis.c
+index c78a043..91c8c5a 100644
+--- a/mm/src/audio/lib/synthesis.c
++++ b/mm/src/audio/lib/synthesis.c
+@@ -2,6 +2,9 @@
+ #include <libultraship/bridge/resourcebridge.h>
+ #include "2s2h/mixer.h"
+ #include <libultraship/bridge/consolevariablebridge.h>
++#ifdef __PS4__
++#include <stdio.h>
++#endif
+ 
+ // DMEM Addresses for the RSP
+ #define DMEM_TEMP 0x3B0
+@@ -216,6 +219,10 @@ void AudioSynth_SyncSampleStates(s32 updateIndex) {
+     }
+ }
+ 
++#ifdef __PS4__
++void AudioSfx_Ps4CheckUnchanged(const char* where);
++#endif
++
+ Acmd* AudioSynth_Update(Acmd* abiCmdStart, s32* numAbiCmds, s16* aiBufStart, s32 numSamplesPerFrame) {
+     s32 numSamplesPerUpdate;
+     s16* curAiBufPos;
+@@ -227,7 +234,13 @@ Acmd* AudioSynth_Update(Acmd* abiCmdStart, s32* numAbiCmds, s16* aiBufStart, s32
+     for (reverseUpdateIndex = gAudioCtx.audioBufferParameters.updatesPerFrame; reverseUpdateIndex > 0;
+          reverseUpdateIndex--) {
+         AudioScript_ProcessSequences(reverseUpdateIndex - 1);
++#ifdef __PS4__
++        AudioSfx_Ps4CheckUnchanged("AudioScript_ProcessSequences");
++#endif
+         AudioSynth_SyncSampleStates(gAudioCtx.audioBufferParameters.updatesPerFrame - reverseUpdateIndex);
++#ifdef __PS4__
++        AudioSfx_Ps4CheckUnchanged("AudioSynth_SyncSampleStates");
++#endif
+     }
+ 
+     curAiBufPos = aiBufStart;
+@@ -1049,6 +1062,30 @@ Acmd* AudioSynth_ProcessSample(s32 noteIndex, NoteSampleState* sampleState, Note
+ 
+                 numFirstFrameSamplesToIgnore = synthState->samplePosInt & 0xF;
+                 numSamplesUntilEnd = sampleEndPos - synthState->samplePosInt;
++                // 2S2H [Port] A position past the end of the loop made every count below negative. The
++                // N64's RSP wrapped the resulting DMEM addresses inside its 4 KiB; the mixer here
++                // wrote far outside its buffer instead. Treat it as being at the end.
++                if (numSamplesUntilEnd < 0) {
++#ifdef __PS4__
++                    {
++                        // 2S2H [PS4] Diagnostics: how a note ends up past its own end.
++                        static s32 sPs4PastEndReports = 0;
++                        if (sPs4PastEndReports < 40) {
++                            sPs4PastEndReports++;
++                            printf("[PS4] NOTE PAST END: note %d pos %d end %d (loop start %u end %u count %d, "
++                                   "sampleEnd %u) codec %d size %u medium %d flags %d part %d/%d toLoad %d "
++                                   "startPos %d stopLoop %d atLoop %d freq 0x%X processed %d\n",
++                                   noteIndex, synthState->samplePosInt, sampleEndPos, loopInfo->start,
++                                   loopInfo->loopEnd, (s32)loopInfo->count, loopInfo->sampleEnd, sample->codec,
++                                   sample->size, sample->medium, flags, curPart, numParts, numSamplesToLoadAdj,
++                                   note->playbackState.startSamplePos, synthState->stopLoop,
++                                   synthState->atLoopPoint, sampleState->frequencyFixedPoint, numSamplesProcessed);
++                            fflush(stdout);
++                        }
++                    }
++#endif
++                    numSamplesUntilEnd = 0;
++                }
+ 
+                 // Calculate number of samples to process this loop
+                 numSamplesToProcess = numSamplesToLoadAdj - numSamplesProcessed;
+@@ -1077,6 +1114,9 @@ Acmd* AudioSynth_ProcessSample(s32 noteIndex, NoteSampleState* sampleState, Note
+                     if (loopInfo->count != 0) {
+                         if ((loopInfo->count == 2) && synthState->stopLoop) {
+                             sampleFinished = true;
++                        } else if (loopInfo->start >= (u32)sampleEndPos) {
++                            // 2S2H [Port] Looping back would land at or past the end again, forever.
++                            sampleFinished = true;
+                         } else {
+                             // Loop around and restart
+                             loopToPoint = true;
+diff --git a/mm/src/audio/lib/thread.c b/mm/src/audio/lib/thread.c
+index 4128ffc..3080a3b 100644
+--- a/mm/src/audio/lib/thread.c
++++ b/mm/src/audio/lib/thread.c
+@@ -17,6 +17,19 @@ s32 AudioThread_GetSamplePos(s32 seqPlayerIndex, s32 channelIndex, s32 layerInde
+ s32 AudioThread_CountAndReleaseNotes(s32 flags);
+ s32 AudioThread_ScheduleProcessCmds(void);
+ 
++#ifdef __PS4__
++void AudioLoad_Ps4CheckScriptLoads(const char* where);
++void AudioSfx_Ps4Snapshot(void);
++void AudioSfx_Ps4CheckUnchanged(const char* where);
++#define PS4_CHECK_SCRIPT_LOADS(where)       \
++    do {                                    \
++        AudioLoad_Ps4CheckScriptLoads(where); \
++        AudioSfx_Ps4CheckUnchanged(where);  \
++    } while (0)
++#else
++#define PS4_CHECK_SCRIPT_LOADS(where)
++#endif
++
+ AudioTask* AudioThread_Update(void) {
+     return AudioThread_UpdateImpl();
+ }
+@@ -40,9 +53,16 @@ void AudioMgr_CreateNextAudioBuffer(s16* samples, u32 num_samples) {
+ 
+     gAudioCtx.totalTaskCount++;
+ 
++#ifdef __PS4__
++    AudioSfx_Ps4Snapshot();
++#endif
++    PS4_CHECK_SCRIPT_LOADS("audio frame start");
+     AudioLoad_DecreaseSampleDmaTtls();
++    PS4_CHECK_SCRIPT_LOADS("after DecreaseSampleDmaTtls");
+     AudioLoad_ProcessLoads(gAudioCtx.resetStatus);
++    PS4_CHECK_SCRIPT_LOADS("after ProcessLoads");
+     AudioLoad_ProcessScriptLoads();
++    PS4_CHECK_SCRIPT_LOADS("after ProcessScriptLoads");
+ 
+     if (gAudioCtx.resetStatus != 0) {
+         if (AudioHeap_ResetStep() == 0) {
+@@ -50,6 +70,7 @@ void AudioMgr_CreateNextAudioBuffer(s16* samples, u32 num_samples) {
+                 osSendMesg8(gAudioCtx.audioResetQueueP, gAudioCtx.specId, OS_MESG_NOBLOCK);
+             }
+         }
++        PS4_CHECK_SCRIPT_LOADS("after heap reset step");
+     }
+ 
+     int j = 0;
+@@ -57,14 +78,17 @@ void AudioMgr_CreateNextAudioBuffer(s16* samples, u32 num_samples) {
+         // msg = 0000RREE R = read pos, E = End Pos
+         while (osRecvMesg(gAudioCtx.threadCmdProcQueueP, &sp4C, OS_MESG_NOBLOCK) != -1) {
+             AudioThread_ProcessCmds(sp4C.data32);
++            PS4_CHECK_SCRIPT_LOADS("AudioThread_ProcessCmds");
+             j++;
+         }
+         if ((j == 0) && (gAudioCtx.threadCmdQueueFinished)) {
+             AudioThread_ScheduleProcessCmds();
+         }
++        PS4_CHECK_SCRIPT_LOADS("after audio commands");
+     }
+     s32 writtenCmds;
+     AudioSynth_Update(gAudioCtx.curAbiCmdBuf, &writtenCmds, samples, num_samples);
++    PS4_CHECK_SCRIPT_LOADS("after synthesis");
+     gAudioCtx.audioRandom = (gAudioCtx.audioRandom + gAudioCtx.totalTaskCount) * osGetCount();
+ }
+ 
+@@ -487,11 +511,14 @@ void AudioThread_ProcessCmds(u32 msg) {
+ 
+ u32 AudioThread_GetExternalLoadQueueMsg(u32* retMsg) {
+     u32 msg;
++    // 2S2H [Port] Receive into a whole OSMesg, it is wider than msg
++    OSMesg mesg;
+ 
+-    if (osRecvMesg(&gAudioCtx.externalLoadQueue, (OSMesg*)&msg, OS_MESG_NOBLOCK) == -1) {
++    if (osRecvMesg(&gAudioCtx.externalLoadQueue, &mesg, OS_MESG_NOBLOCK) == -1) {
+         *retMsg = 0;
+         return 0;
+     }
++    msg = mesg.data32;
+ 
+     *retMsg = msg & 0xFFFFFF;
+     return msg >> 0x18;
+@@ -522,7 +549,7 @@ s32 func_80193C5C(void) {
+ void AudioThread_WaitForAudioResetQueueP(void) {
+     // macro?
+     // clang-format off
+-    s32 chk = -1; s32 msg; do {} while (osRecvMesg(gAudioCtx.audioResetQueueP, (OSMesg*)&msg, OS_MESG_NOBLOCK) != chk);
++    s32 chk = -1; OSMesg msg; do {} while (osRecvMesg(gAudioCtx.audioResetQueueP, &msg, OS_MESG_NOBLOCK) != chk);
+     // clang-format on
+ }
+ 
+diff --git a/mm/src/audio/sfx.c b/mm/src/audio/sfx.c
+index aec1aba..23c0b72 100644
+--- a/mm/src/audio/sfx.c
++++ b/mm/src/audio/sfx.c
+@@ -67,6 +67,120 @@ u8 sSfxBankSizes[ARRAY_COUNT(gSfxBanks)] = {
+     ARRAY_COUNT(sSfxVoiceBank),
+ };
+ 
++#ifdef __PS4__
++// 2S2H [PS4] On PS4 the sfx bank lists were found with EMPTY entries still linked in, which made
++// the list walks below loop forever. Two tools:
++//  - every walk is capped: a broken list gets rebuilt (all sfx stopped) instead of hanging the game;
++//  - the banks belong to the game thread, so the audio thread must never change them: it takes a
++//    snapshot when it starts a frame and checks it after each stage, logging what changed where.
++#include <stdio.h>
++#define PS4_SFX_MAX_WALK 256
++
++static s32 sPs4SfxRepairs = 0;
++static u8 sPs4SfxShadow[9 + 12 + 32 + 20 + 8 + 3 + 5][sizeof(SfxBankEntry)];
++static u8 sPs4SfxShadowHeads[2][ARRAY_COUNT(gSfxBanks)];
++static s32 sPs4SfxShadowValid = false;
++static s32 sPs4SfxDiffReports = 0;
++
++void AudioSfx_Ps4RepairBanks(const char* where) {
++    u8 bankId;
++    u8 i;
++
++    if (sPs4SfxRepairs < 8) {
++        printf("[PS4] SFX LIST BROKEN in %s: rebuilding the sfx banks\n", where);
++        fflush(stdout);
++    }
++    sPs4SfxRepairs++;
++    for (i = 0; i < 16; i++) {
++        AUDIOCMD_CHANNEL_SET_IO(SEQ_PLAYER_SFX, i, 0, 0);
++    }
++    for (bankId = 0; bankId < ARRAY_COUNT(gSfxBanks); bankId++) {
++        sSfxBankListEnd[bankId] = 0;
++        sSfxBankFreeListStart[bankId] = 1;
++        for (i = 0; i < MAX_CHANNELS_PER_BANK; i++) {
++            gActiveSfx[bankId][i].entryIndex = 0xFF;
++        }
++        gSfxBanks[bankId][0].prev = 0xFF;
++        gSfxBanks[bankId][0].next = 0xFF;
++        for (i = 1; i < sSfxBankSizes[bankId] - 1; i++) {
++            gSfxBanks[bankId][i].prev = i - 1;
++            gSfxBanks[bankId][i].next = i + 1;
++            gSfxBanks[bankId][i].state = SFX_STATE_EMPTY;
++        }
++        gSfxBanks[bankId][i].prev = i - 1;
++        gSfxBanks[bankId][i].next = 0xFF;
++        gSfxBanks[bankId][i].state = SFX_STATE_EMPTY;
++    }
++}
++
++void AudioSfx_Ps4Snapshot(void) {
++    u8 bankId;
++    s32 row = 0;
++
++    for (bankId = 0; bankId < ARRAY_COUNT(gSfxBanks); bankId++) {
++        memcpy(sPs4SfxShadow[row], gSfxBanks[bankId], sSfxBankSizes[bankId] * sizeof(SfxBankEntry));
++        row += sSfxBankSizes[bankId];
++    }
++    memcpy(sPs4SfxShadowHeads[0], sSfxBankListEnd, sizeof(sSfxBankListEnd));
++    memcpy(sPs4SfxShadowHeads[1], sSfxBankFreeListStart, sizeof(sSfxBankFreeListStart));
++    sPs4SfxShadowValid = true;
++}
++
++void AudioSfx_Ps4CheckUnchanged(const char* where) {
++    u8 bankId;
++    s32 row = 0;
++    s32 i;
++    s32 j;
++    s32 changed = false;
++
++    if (!sPs4SfxShadowValid) {
++        return;
++    }
++    for (bankId = 0; bankId < ARRAY_COUNT(gSfxBanks); bankId++) {
++        for (i = 0; i < sSfxBankSizes[bankId]; i++, row++) {
++            const u8* now = (const u8*)&gSfxBanks[bankId][i];
++            if (memcmp(now, sPs4SfxShadow[row], sizeof(SfxBankEntry)) == 0) {
++                continue;
++            }
++            changed = true;
++            if (sPs4SfxDiffReports < 24) {
++                sPs4SfxDiffReports++;
++                printf("[PS4] SFX BANK WRITTEN BY THE AUDIO THREAD (%s, audio frame %u): bank %d entry %d (%p):", where,
++                       (u32)gAudioCtx.totalTaskCount, bankId, i, (const void*)now);
++                for (j = 0; j < (s32)sizeof(SfxBankEntry); j++) {
++                    if (now[j] != sPs4SfxShadow[row][j]) {
++                        printf(" +%02X:%02X>%02X", j, sPs4SfxShadow[row][j], now[j]);
++                    }
++                }
++                printf("\n");
++            }
++        }
++    }
++    if (memcmp(sPs4SfxShadowHeads[0], sSfxBankListEnd, sizeof(sSfxBankListEnd)) != 0 ||
++        memcmp(sPs4SfxShadowHeads[1], sSfxBankFreeListStart, sizeof(sSfxBankFreeListStart)) != 0) {
++        changed = true;
++        if (sPs4SfxDiffReports < 24) {
++            sPs4SfxDiffReports++;
++            printf("[PS4] SFX LIST HEADS WRITTEN BY THE AUDIO THREAD (%s)\n", where);
++        }
++    }
++    if (changed) {
++        fflush(stdout);
++        AudioSfx_Ps4Snapshot();
++    }
++}
++
++#define PS4_SFX_WALK_INIT() s32 ps4WalkCount = 0
++#define PS4_SFX_WALK_STEP(where)                     \
++    if (++ps4WalkCount > PS4_SFX_MAX_WALK) {         \
++        AudioSfx_Ps4RepairBanks(where);              \
++        break;                                       \
++    }
++#else
++#define PS4_SFX_WALK_INIT() (void)0
++#define PS4_SFX_WALK_STEP(where)
++#endif
++
+ u8 gSfxChannelLayout = 0;
+ u16 sSfxChannelLowVolumeFlag = 0;
+ 
+@@ -236,7 +350,9 @@ void AudioSfx_ProcessRequest(void) {
+     index = gSfxBanks[bankId][0].next;
+ 
+     // Compare the sfx request to all sfx bank entries
++    PS4_SFX_WALK_INIT();
+     while ((index != 0xFF) && (index != 0)) {
++        PS4_SFX_WALK_STEP("AudioSfx_ProcessRequest");
+ 
+         // If an existing sfx from the same source exists in the bank, then we should either:
+         // renew if it is the same sfx, check if any sfx channels are available for that bank,
+@@ -413,7 +529,9 @@ void AudioSfx_ChooseActiveSfx(u8 bankId) {
+     k = 0;
+ 
+     // Delete stale sfx and prioritize remaining sfx into the gActiveSfx arrays
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_ChooseActiveSfx");
+ 
+         // Update the freshness for an "all-frame" sfx if it is still queued
+         if ((gSfxBanks[bankId][entryIndex].state == SFX_STATE_QUEUED) &&
+@@ -705,7 +823,9 @@ void AudioSfx_StopByBank(u8 bankId) {
+     SfxBankEntry entryToRemove;
+     u8 entryIndex = gSfxBanks[bankId][0].next;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_StopByBank");
+         entry = &gSfxBanks[bankId][entryIndex];
+         if (entry->state >= SFX_STATE_PLAYING_REFRESH) {
+             AUDIOCMD_CHANNEL_SET_IO(SEQ_PLAYER_SFX, entry->channelIndex, 0, 0);
+@@ -726,7 +846,9 @@ void AudioSfx_StopByPosAndBankImpl(u8 bankId, Vec3f* pos) {
+     u8 entryIndex = gSfxBanks[bankId][0].next;
+     u8 prevEntryIndex = 0;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_StopByPosAndBankImpl");
+         entry = &gSfxBanks[bankId][entryIndex];
+         if (entry->posX == &pos->x) {
+             if (entry->state >= SFX_STATE_PLAYING_REFRESH) {
+@@ -771,7 +893,9 @@ void AudioSfx_StopByPosAndId(Vec3f* pos, u16 sfxId) {
+     u8 prevEntryIndex = 0;
+     SfxBankEntry entryToRemove;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_StopByPosAndId");
+         entry = &gSfxBanks[SFX_BANK(sfxId)][entryIndex];
+         if ((entry->posX == &pos->x) && (entry->sfxId == sfxId)) {
+             if (entry->state >= SFX_STATE_PLAYING_REFRESH) {
+@@ -802,7 +926,9 @@ void AudioSfx_StopByTokenAndId(u8 token, u16 sfxId) {
+     u8 prevEntryIndex = 0;
+     SfxBankEntry entryToRemove;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_StopByTokenAndId");
+         entry = &gSfxBanks[SFX_BANK(sfxId)][entryIndex];
+         if ((entry->token == token) && (entry->sfxId == sfxId)) {
+             if (entry->state >= SFX_STATE_PLAYING_REFRESH) {
+@@ -832,7 +958,9 @@ void AudioSfx_StopById(u32 sfxId) {
+     u8 prevEntryIndex = 0;
+     SfxBankEntry entryToRemove;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_StopById");
+         entry = &gSfxBanks[SFX_BANK(sfxId)][entryIndex];
+         if (entry->sfxId == sfxId) {
+             if (entry->state >= SFX_STATE_PLAYING_REFRESH) {
+@@ -904,7 +1032,9 @@ u8 AudioSfx_IsPlaying(u32 sfxId) {
+     SfxBankEntry* entry;
+     u8 entryIndex = gSfxBanks[SFX_BANK(sfxId)][0].next;
+ 
++    PS4_SFX_WALK_INIT();
+     while (entryIndex != 0xFF) {
++        PS4_SFX_WALK_STEP("AudioSfx_IsPlaying");
+         entry = &gSfxBanks[SFX_BANK(sfxId)][entryIndex];
+         if (entry->sfxId == sfxId) {
+             return true;
+diff --git a/mm/src/code/main.c b/mm/src/code/main.c
+index c024214..26e5d6b 100644
+--- a/mm/src/code/main.c
++++ b/mm/src/code/main.c
+@@ -49,7 +49,10 @@ size_t gSystemHeapSize = 0;
+ 
+ void InitOTR(int argc, char* argv[]);
+ void Heaps_Free(void);
+-#ifdef __GNUC__
++#if defined(__PS4__)
++// The process entry point is in 2s2h/port/ps4/Ps4Main.cpp, it runs this on a thread with a big stack.
++#define SDL_main ship_main
++#elif defined(__GNUC__)
+ #define SDL_main main
+ #endif
+ 

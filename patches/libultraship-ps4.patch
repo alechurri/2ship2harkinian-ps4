@@ -1,0 +1,3049 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 08cc7915..9d2101f7 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -72,6 +72,10 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+     include(cmake/dependencies/windows.cmake)
+ endif()
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "PS4")
++    include(cmake/dependencies/ps4.cmake)
++endif()
++
+ # === Platform Specific Configuration ===
+ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     include(cmake/ios-toolchain-populate.cmake)
+diff --git a/cmake/dependencies/ps4.cmake b/cmake/dependencies/ps4.cmake
+new file mode 100644
+index 00000000..e4692332
+--- /dev/null
++++ b/cmake/dependencies/ps4.cmake
+@@ -0,0 +1,11 @@
++#=================== ImGui ===================
++# Rendering goes through Piglet (OpenGL ES 2.0), SDL2 is only used for input and timing.
++find_package(SDL2 REQUIRED CONFIG)
++target_link_libraries(ImGui PUBLIC SDL2::SDL2-static)
++target_compile_definitions(ImGui PUBLIC IMGUI_IMPL_OPENGL_ES2)
++set(USE_OPENGLES ON CACHE BOOL "" FORCE)
++
++# imgui_impl_opengl3.cpp always prepends a "#version" line to its shaders; route its glShaderSource
++# calls through Ps4GlShaderSourceNoVersion (Ps4Platform.cpp), which strips it.
++set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp PROPERTIES
++    COMPILE_DEFINITIONS "glShaderSource=Ps4GlShaderSourceNoVersion")
+diff --git a/include/fast/backends/gfx_opengl.h b/include/fast/backends/gfx_opengl.h
+index af24c702..22619a6a 100644
+--- a/include/fast/backends/gfx_opengl.h
++++ b/include/fast/backends/gfx_opengl.h
+@@ -16,6 +16,12 @@
+ #elif __APPLE__
+ #include <SDL2/SDL.h>
+ #include <GL/glew.h>
++#elif defined(__PS4__)
++// Piglet: OpenGL ES 2.0 + EGL 1.4
++#include <stdint.h>
++#include <stdbool.h>
++#include <SDL2/SDL.h>
++#include <orbis/Pigletv2VSH.h>
+ #elif USE_OPENGLES
+ #include <SDL2/SDL.h>
+ #include <GLES3/gl3.h>
+@@ -109,6 +115,16 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
+     void SetUniforms(ShaderProgram* prg) const;
+     std::string BuildFsShader(const CCFeatures& cc_features);
+     void SetPerDrawUniforms();
++#ifdef __PS4__
++    void WarmUpShaders();
++    void BlitTexture(GLuint texture, int texWidth, int texHeight, int srcX0, int srcY0, int srcX1, int srcY1,
++                     GLuint dstFbo, int dstX0, int dstY0, int dstX1, int dstY1);
++    GLuint mBlitProgram = 0;
++    GLint mBlitPosLocation = -1;
++    GLint mBlitUvLocation = -1;
++    GLuint mBlitScratchTexture = 0;
++    int mLastScissorX = 0, mLastScissorY = 0, mLastScissorW = 0, mLastScissorH = 0;
++#endif
+ 
+     std::vector<TextureInfo> textures;
+     GLuint mCurrentTextureIds[SHADER_MAX_TEXTURES] = {};
+@@ -118,7 +134,7 @@ class GfxRenderingAPIOGL final : public GfxRenderingAPI {
+     int8_t mLastBlendEnabled = -1;
+     int8_t mLastScissorEnabled = -1;
+ 
+-    std::map<std::pair<uint64_t, uint32_t>, ShaderProgram> mShaderProgramPool;
++    std::map<std::pair<uint64_t, uint64_t>, ShaderProgram> mShaderProgramPool;
+     ShaderProgram* mCurrentShaderProgram;
+     ShaderProgram* mLastLoadedShader = nullptr;
+ 
+diff --git a/include/fast/backends/gfx_opengl_ps4_shaders.h b/include/fast/backends/gfx_opengl_ps4_shaders.h
+new file mode 100644
+index 00000000..4792aee3
+--- /dev/null
++++ b/include/fast/backends/gfx_opengl_ps4_shaders.h
+@@ -0,0 +1,306 @@
++#pragma once
++#ifdef __PS4__
++
++// Prism templates for the PS4 (Piglet) renderer.
++//
++// Piglet compiles GLSL ES 1.00, so compared to shaders/opengl/default.shader.* these:
++//  - use attribute/varying/texture2D/gl_FragColor,
++//  - never index a uniform array with a non-constant expression,
++//  - avoid textureSize() and mix() with a boolean selector.
++// They are embedded in the executable so the port doesn't depend on the shader stored in soh.o2r.
++
++namespace Fast {
++
++static const char* const gPs4VertexShaderTemplate = R"PS4SHADER(@prism(type='vertex', name='Fast3D Vertex Shader (PS4)', version='1.0.0', description='GLSL ES 1.00 variant for Piglet', author='Emill & Prism Team')
++
++attribute vec4 aVtxPos;
++
++@for(i in 0..2)
++    @if(o_textures[i])
++        attribute vec2 aTexCoord@{i};
++        varying vec2 vTexCoord@{i};
++        @{update_floats(2)}
++        @for(j in 0..2)
++            @if(o_clamp[i][j])
++                @if(j == 0)
++                    attribute float aTexClampS@{i};
++                    varying float vTexClampS@{i};
++                @else
++                    attribute float aTexClampT@{i};
++                    varying float vTexClampT@{i};
++                @end
++                @{update_floats(1)}
++            @end
++        @end
++    @end
++@end
++
++@if(o_fog)
++    attribute vec4 aFog;
++    varying vec4 vFog;
++    @{update_floats(4)}
++@end
++
++@if(o_grayscale)
++    attribute vec4 aGrayscaleColor;
++    varying vec4 vGrayscaleColor;
++    @{update_floats(4)}
++@end
++
++@for(i in 0..o_inputs)
++    @if(o_alpha)
++        attribute vec4 aInput@{i + 1};
++        varying vec4 vInput@{i + 1};
++        @{update_floats(4)}
++    @else
++        attribute vec3 aInput@{i + 1};
++        varying vec3 vInput@{i + 1};
++        @{update_floats(3)}
++    @end
++@end
++
++@if(o_prim_depth)
++uniform float prim_depth;
++@end
++
++void main() {
++     @for(i in 0..2)
++        @if(o_textures[i])
++            vTexCoord@{i} = aTexCoord@{i};
++            @for(j in 0..2)
++                @if(o_clamp[i][j])
++                    @if(j == 0)
++                        vTexClampS@{i} = aTexClampS@{i};
++                    @else
++                        vTexClampT@{i} = aTexClampT@{i};
++                    @end
++                @end
++            @end
++        @end
++    @end
++    @if(o_fog)
++        vFog = aFog;
++    @end
++    @if(o_grayscale)
++        vGrayscaleColor = aGrayscaleColor;
++    @end
++    @for(i in 0..o_inputs)
++        vInput@{i + 1} = aInput@{i + 1};
++    @end
++    gl_Position = aVtxPos;
++    // No depth clamp on GLES: squeeze clip space z instead so geometry beyond the far plane survives.
++    gl_Position.z *= 0.3;
++    @if(o_prim_depth)
++    // G_ZS_PRIM: GLES2 has no gl_FragDepth. The depth is constant over the primitive, so set it
++    // per vertex instead (window depth prim_depth, squeezed like everything else).
++    gl_Position.z = 0.3 * (2.0 * prim_depth - 1.0) * gl_Position.w;
++    @end
++}
++)PS4SHADER";
++
++static const char* const gPs4FragmentShaderTemplate = R"PS4SHADER(@prism(type='fragment', name='Fast3D Fragment Shader (PS4)', version='1.0.0', description='GLSL ES 1.00 variant for Piglet', author='Emill & Prism Team')
++
++precision mediump float;
++
++@for(i in 0..2)
++    @if(o_textures[i])
++        varying vec2 vTexCoord@{i};
++        @for(j in 0..2)
++            @if(o_clamp[i][j])
++                @if(j == 0)
++                    varying float vTexClampS@{i};
++                @else
++                    varying float vTexClampT@{i};
++                @end
++            @end
++        @end
++    @end
++@end
++
++@if(o_fog) varying vec4 vFog;
++@if(o_grayscale) varying vec4 vGrayscaleColor;
++
++@for(i in 0..o_inputs)
++    @if(o_alpha)
++        varying vec4 vInput@{i + 1};
++    @else
++        varying vec3 vInput@{i + 1};
++    @end
++@end
++
++@if(o_textures[0]) uniform sampler2D uTex0;
++@if(o_textures[1]) uniform sampler2D uTex1;
++
++@if(o_masks[0]) uniform sampler2D uTexMask0;
++@if(o_masks[1]) uniform sampler2D uTexMask1;
++
++@if(o_blend[0]) uniform sampler2D uTexBlend0;
++@if(o_blend[1]) uniform sampler2D uTexBlend1;
++
++uniform int frame_count;
++uniform float noise_scale;
++
++uniform int texture_width[2];
++uniform int texture_height[2];
++uniform int texture_filtering[2];
++
++#define TEX_OFFSET(off) texture2D(tex, texCoord - off / texSize)
++#define WRAP(x, low, high) mod((x)-(low), (high)-(low)) + (low)
++
++float random(in vec3 value) {
++    float r = dot(sin(value), vec3(12.9898, 78.233, 37.719));
++    return fract(sin(r) * 143758.5453);
++}
++
++vec4 fromLinear(vec4 linearRGB) {
++    vec3 cutoff = step(linearRGB.rgb, vec3(0.0031308));
++    vec3 higher = vec3(1.055) * pow(linearRGB.rgb, vec3(1.0 / 2.4)) - vec3(0.055);
++    vec3 lower = linearRGB.rgb * vec3(12.92);
++    return vec4(mix(higher, lower, cutoff), linearRGB.a);
++}
++
++vec4 filter3point(in sampler2D tex, in vec2 texCoord, in vec2 texSize) {
++    vec2 offset = fract(texCoord*texSize - vec2(0.5));
++    offset -= step(1.0, offset.x + offset.y);
++    vec4 c0 = TEX_OFFSET(offset);
++    vec4 c1 = TEX_OFFSET(vec2(offset.x - sign(offset.x), offset.y));
++    vec4 c2 = TEX_OFFSET(vec2(offset.x, offset.y - sign(offset.y)));
++    return c0 + abs(offset.x)*(c1-c0) + abs(offset.y)*(c2-c0);
++}
++
++vec4 hookTexture2D(in int filtering, in sampler2D tex, in vec2 uv, in vec2 texSize) {
++@if(o_three_point_filtering)
++    if (filtering == @{FILTER_THREE_POINT}) {
++        return filter3point(tex, uv, texSize);
++    }
++@end
++    return texture2D(tex, uv);
++}
++
++void main() {
++    @for(i in 0..2)
++        @if(o_textures[i])
++            @{s = o_clamp[i][0]}
++            @{t = o_clamp[i][1]}
++
++            vec2 texSize@{i} = vec2(float(texture_width[@{i}]), float(texture_height[@{i}]));
++
++            @if(!s && !t)
++                vec2 vTexCoordAdj@{i} = vTexCoord@{i};
++            @else
++                @if(s && t)
++                    vec2 vTexCoordAdj@{i} = clamp(vTexCoord@{i}, 0.5 / texSize@{i}, vec2(vTexClampS@{i}, vTexClampT@{i}));
++                @elseif(s)
++                    vec2 vTexCoordAdj@{i} = vec2(clamp(vTexCoord@{i}.s, 0.5 / texSize@{i}.s, vTexClampS@{i}), vTexCoord@{i}.t);
++                @else
++                    vec2 vTexCoordAdj@{i} = vec2(vTexCoord@{i}.s, clamp(vTexCoord@{i}.t, 0.5 / texSize@{i}.t, vTexClampT@{i}));
++                @end
++            @end
++
++            vec4 texVal@{i} = hookTexture2D(texture_filtering[@{i}], uTex@{i}, vTexCoordAdj@{i}, texSize@{i});
++
++            @if(o_masks[i])
++                vec2 maskSize@{i} = texSize@{i};
++
++                vec4 maskVal@{i} = hookTexture2D(texture_filtering[@{i}], uTexMask@{i}, vTexCoordAdj@{i}, maskSize@{i});
++
++                @if(o_blend[i])
++                    vec4 blendVal@{i} = hookTexture2D(texture_filtering[@{i}], uTexBlend@{i}, vTexCoordAdj@{i}, texSize@{i});
++                @else
++                    vec4 blendVal@{i} = vec4(0.0, 0.0, 0.0, 0.0);
++                @end
++
++                texVal@{i} = mix(texVal@{i}, blendVal@{i}, maskVal@{i}.a);
++            @end
++        @end
++    @end
++
++    @if(o_alpha)
++        vec4 texel;
++    @else
++        vec3 texel;
++    @end
++
++    @if(o_2cyc)
++        @{f_range = 2}
++    @else
++        @{f_range = 1}
++    @end
++
++    @for(c in 0..f_range)
++        @if(c == 1)
++            @if(o_alpha)
++                @if(o_c[c][1][2] == SHADER_COMBINED)
++                    texel.a = WRAP(texel.a, -1.01, 1.01);
++                @else
++                    texel.a = WRAP(texel.a, -0.51, 1.51);
++                @end
++            @end
++
++            @if(o_c[c][0][2] == SHADER_COMBINED)
++                texel.rgb = WRAP(texel.rgb, -1.01, 1.01);
++            @else
++                texel.rgb = WRAP(texel.rgb, -0.51, 1.51);
++            @end
++        @end
++
++        @if(!o_color_alpha_same[c] && o_alpha)
++            texel = vec4(@{
++            append_formula(o_c[c], o_do_single[c][0],
++                           o_do_multiply[c][0], o_do_mix[c][0], false, false, true, c == 0)
++            }, @{append_formula(o_c[c], o_do_single[c][1],
++                           o_do_multiply[c][1], o_do_mix[c][1], true, true, true, c == 0)
++            });
++        @else
++            texel = @{append_formula(o_c[c], o_do_single[c][0],
++                           o_do_multiply[c][0], o_do_mix[c][0], o_alpha, false,
++                           o_alpha, c == 0)};
++        @end
++    @end
++
++    texel = WRAP(texel, -0.51, 1.51);
++    texel = clamp(texel, 0.0, 1.0);
++    // TODO discard if alpha is 0?
++    @if(o_fog)
++        @if(o_alpha)
++            texel = vec4(mix(texel.rgb, vFog.rgb, vFog.a), texel.a);
++        @else
++            texel = mix(texel, vFog.rgb, vFog.a);
++        @end
++    @end
++
++    @if(o_texture_edge && o_alpha)
++        if (texel.a > 0.19) texel.a = 1.0; else discard;
++    @end
++
++    @if(o_alpha && o_noise)
++        texel.a *= floor(clamp(random(vec3(floor(gl_FragCoord.xy * noise_scale), float(frame_count))) + texel.a, 0.0, 1.0));
++    @end
++
++    @if(o_grayscale)
++        float intensity = (texel.r + texel.g + texel.b) / 3.0;
++        vec3 new_texel = vGrayscaleColor.rgb * intensity;
++        texel.rgb = mix(texel.rgb, new_texel, vGrayscaleColor.a);
++    @end
++
++    @if(o_alpha)
++        @if(o_alpha_threshold)
++            if (texel.a < 8.0 / 256.0) discard;
++        @end
++        @if(o_invisible)
++            texel.a = 0.0;
++        @end
++        gl_FragColor = texel;
++    @else
++        gl_FragColor = vec4(texel, 1.0);
++    @end
++
++    @if(srgb_mode)
++        gl_FragColor = fromLinear(gl_FragColor);
++    @end
++}
++)PS4SHADER";
++
++} // namespace Fast
++
++#endif // __PS4__
+diff --git a/include/ship/port/ps4/Ps4Platform.h b/include/ship/port/ps4/Ps4Platform.h
+new file mode 100644
+index 00000000..c7cbf626
+--- /dev/null
++++ b/include/ship/port/ps4/Ps4Platform.h
+@@ -0,0 +1,51 @@
++#pragma once
++#ifdef __PS4__
++
++#include <stdint.h>
++
++// PS4 (OpenOrbis) platform layer.
++//
++// Rendering goes through Piglet, Sony's OpenGL ES 2.0 / EGL implementation. The stock SDL2 has no
++// PS4 backend, so SDL runs on its dummy video driver and is only used for timing, events and the
++// game controller API; the DualShock 4 is exposed to it as an SDL virtual joystick.
++
++namespace Ship {
++namespace Ps4 {
++
++constexpr int kDisplayWidth = 1920;
++constexpr int kDisplayHeight = 1080;
++
++// Loads the system modules + Piglet and creates the EGL window surface and GLES2 context.
++// Returns false (after logging the reason) if anything fails.
++// Loads the system modules the port calls into (user service, pad, audio...). Safe to call more
++// than once; everything that touches one of them calls this first, since the order in which the
++// engine sets up input, audio and the window differs between versions.
++bool LoadSystemModules();
++bool InitGraphics(int width, int height);
++// Takes down the system's boot splash; call once the first frame is about to be drawn.
++void HideSplashScreen();
++void SwapBuffers();
++// For hang detection: frames presented so far, and whether eglSwapBuffers() is running right now.
++uint64_t GetSwapCount();
++bool IsSwapInProgress();
++void SetSwapInterval(int interval);
++// True when buffer swaps wait for the vertical blank.
++bool IsVsyncActive();
++void ShutdownGraphics();
++// Opaque non-null handle for code that wants "the GL context" (ImGui's SDL backend).
++void* GetGlContext();
++
++// Registers the DualShock 4 of the user that started the game as an SDL game controller.
++// Has to be called after SDL_Init(SDL_INIT_GAMECONTROLLER).
++void AttachPad();
++
++// Writes one line with the state of the heap arena and of the system memory pools to the log.
++void LogMemoryStats(const char* when);
++
++// The user service is shared between pad and audio; safe to call more than once.
++int32_t GetInitialUserId();
++
++} // namespace Ps4
++} // namespace Ship
++
++#endif // __PS4__
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 45989b66..56a1347e 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -72,7 +72,7 @@ target_include_directories(libultraship
+ 
+ #=================== Linking ===================
+ if(INCLUDE_MPQ_SUPPORT)
+-    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
++    if (NOT CMAKE_SYSTEM_NAME STREQUAL "Windows" AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT CMAKE_SYSTEM_NAME STREQUAL "PS4")
+         target_link_libraries(libultraship PUBLIC "$<LINK_LIBRARY:WHOLE_ARCHIVE,storm>")
+     else()
+         target_link_libraries(libultraship PUBLIC storm)
+@@ -120,7 +120,7 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     target_link_libraries(libultraship PRIVATE ${OSX_FOUNDATION} ${OSX_AVFOUNDATION} ${METAL} ${QUARTZCORE} ${COREAUDIO} ${AUDIOTOOLBOX} ${CMAKE_DL_LIBS})
+ endif()
+ 
+-if (USE_OPENGLES)
++if (USE_OPENGLES AND NOT CMAKE_SYSTEM_NAME STREQUAL "PS4")
+     if (CMAKE_SYSTEM_NAME STREQUAL "Android")
+         find_library(OPENGLES_LIBRARY GLESv3)
+         target_link_libraries(libultraship PRIVATE GLESv3)
+diff --git a/src/fast/Fast3dGui.cpp b/src/fast/Fast3dGui.cpp
+index 237a502a..59050d6a 100644
+--- a/src/fast/Fast3dGui.cpp
++++ b/src/fast/Fast3dGui.cpp
+@@ -58,7 +58,7 @@ bool Fast3dGui::SupportsViewports() {
+     }
+ #endif
+ 
+-#if defined(__ANDROID__) || defined(__IOS__)
++#if defined(__ANDROID__) || defined(__IOS__) || defined(__PS4__)
+     return false;
+ #endif
+ 
+@@ -146,6 +146,9 @@ void Fast3dGui::ImGuiBackendInit() {
+         case WindowBackend::FAST3D_SDL_OPENGL:
+ #ifdef __APPLE__
+             ImGui_ImplOpenGL3_Init("#version 410 core");
++#elif defined(__PS4__)
++            // GLES2 shaders; the directive itself is stripped before it reaches Piglet.
++            ImGui_ImplOpenGL3_Init("#version 100");
+ #elif USE_OPENGLES
+             ImGui_ImplOpenGL3_Init("#version 300 es");
+ #else
+diff --git a/src/fast/backends/gfx_opengl.cpp b/src/fast/backends/gfx_opengl.cpp
+index ad9b1dde..fee328b7 100644
+--- a/src/fast/backends/gfx_opengl.cpp
++++ b/src/fast/backends/gfx_opengl.cpp
+@@ -1,5 +1,6 @@
+ #include "ship/window/Window.h"
+-#ifdef ENABLE_OPENGL
++// The PS4 (Piglet / OpenGL ES 2.0) renderer lives in gfx_opengl_ps4.cpp
++#if defined(ENABLE_OPENGL) && !defined(__PS4__)
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
+diff --git a/src/fast/backends/gfx_opengl_ps4.cpp b/src/fast/backends/gfx_opengl_ps4.cpp
+new file mode 100644
+index 00000000..14eb49e7
+--- /dev/null
++++ b/src/fast/backends/gfx_opengl_ps4.cpp
+@@ -0,0 +1,1236 @@
++#include "ship/window/Window.h"
++// OpenGL ES 2.0 renderer for PS4 (Piglet). Derived from gfx_opengl.cpp, with everything that needs
++// desktop GL / GLES3 (MSAA, glBlitFramebuffer, VAOs, depth read back, sized formats) replaced.
++#if defined(ENABLE_OPENGL) && defined(__PS4__)
++
++#include <stdint.h>
++#include <stdbool.h>
++#include <stdio.h>
++
++#include <map>
++#include <unordered_map>
++
++#ifndef _LANGUAGE_C
++#define _LANGUAGE_C
++#endif
++
++#ifdef __MINGW32__
++#define FOR_WINDOWS 1
++#else
++#define FOR_WINDOWS 0
++#endif
++
++#include "fast/backends/gfx_opengl.h"
++#include "ship/window/gui/Gui.h"
++#include <prism/processor.h>
++#include <fstream>
++#include "ship/Context.h"
++#include "ship/resource/factory/ShaderFactory.h"
++#include "fast/interpreter.h"
++#include "ship/config/ConsoleVariable.h"
++#include "fast/backends/gfx_opengl_ps4_shaders.h"
++#include <spdlog/spdlog.h>
++#include <algorithm>
++#include <cstring>
++#include <filesystem>
++#include <vector>
++
++#include "ship/port/ps4/Ps4Platform.h"
++
++namespace Fast {
++int GfxRenderingAPIOGL::GetMaxTextureSize() {
++    GLint max_texture_size;
++    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
++    return max_texture_size;
++}
++
++const char* GfxRenderingAPIOGL::GetName() {
++    return "OpenGL";
++}
++
++GfxClipParameters GfxRenderingAPIOGL::GetClipParameters() {
++    return { false, mFrameBuffers[mCurrentFrameBuffer].invertY };
++}
++
++static void VertexArraySetAttribs(ShaderProgram* prg) {
++    size_t numFloats = prg->numFloats;
++    size_t pos = 0;
++
++    for (int i = 0; i < prg->numAttribs; i++) {
++        if (prg->attribLocations[i] >= 0) {
++            glEnableVertexAttribArray(prg->attribLocations[i]);
++            glVertexAttribPointer(prg->attribLocations[i], prg->attribSizes[i], GL_FLOAT, GL_FALSE,
++                                  numFloats * sizeof(float), (void*)(pos * sizeof(float)));
++        }
++        pos += prg->attribSizes[i];
++    }
++}
++
++void GfxRenderingAPIOGL::SetUniforms(ShaderProgram* prg) const {
++    glUniform1i(prg->frameCountLocation, mFrameCount);
++    glUniform1f(prg->noiseScaleLocation, mCurrentNoiseScale);
++}
++
++void GfxRenderingAPIOGL::SetPerDrawUniforms() {
++    if (mCurrentShaderProgram->prim_depth_location >= 0) {
++        glUniform1f(mCurrentShaderProgram->prim_depth_location, mCurrentPrimDepth);
++    }
++
++    if (mCurrentShaderProgram->usedTextures[0] || mCurrentShaderProgram->usedTextures[1]) {
++        GLint filtering[2] = { textures[mCurrentTextureIds[0]].filtering, textures[mCurrentTextureIds[1]].filtering };
++        glUniform1iv(mCurrentShaderProgram->texture_filtering_location, 2, filtering);
++
++        GLint width[2] = { textures[mCurrentTextureIds[0]].width, textures[mCurrentTextureIds[1]].width };
++        glUniform1iv(mCurrentShaderProgram->texture_width_location, 2, width);
++
++        GLint height[2] = { textures[mCurrentTextureIds[0]].height, textures[mCurrentTextureIds[1]].height };
++        glUniform1iv(mCurrentShaderProgram->texture_height_location, 2, height);
++    }
++}
++
++void GfxRenderingAPIOGL::UnloadShader(ShaderProgram* old_prg) {
++    if (old_prg != nullptr && old_prg == mLastLoadedShader) {
++        for (unsigned int i = 0; i < old_prg->numAttribs; i++) {
++            if (old_prg->attribLocations[i] >= 0) {
++                glDisableVertexAttribArray(old_prg->attribLocations[i]);
++            }
++        }
++        mLastLoadedShader = nullptr;
++    }
++}
++
++void GfxRenderingAPIOGL::LoadShader(ShaderProgram* new_prg) {
++    // if (!new_prg) return;
++    mCurrentShaderProgram = new_prg;
++    if (new_prg != mLastLoadedShader) {
++        glUseProgram(new_prg->openglProgramId);
++        VertexArraySetAttribs(new_prg);
++        mLastLoadedShader = new_prg;
++    }
++    SetUniforms(new_prg);
++}
++
++#define RAND_NOISE "((random(vec3(floor(gl_FragCoord.xy * noise_scale), float(frame_count))) + 1.0) / 2.0)"
++
++static const char* shader_item_to_str(uint32_t item, bool with_alpha, bool only_alpha, bool inputs_have_alpha,
++                                      bool first_cycle, bool hint_single_element) {
++    if (!only_alpha) {
++        switch (item) {
++            case SHADER_0:
++                return with_alpha ? "vec4(0.0, 0.0, 0.0, 0.0)" : "vec3(0.0, 0.0, 0.0)";
++            case SHADER_1:
++                return with_alpha ? "vec4(1.0, 1.0, 1.0, 1.0)" : "vec3(1.0, 1.0, 1.0)";
++            case SHADER_INPUT_1:
++                return with_alpha || !inputs_have_alpha ? "vInput1" : "vInput1.rgb";
++            case SHADER_INPUT_2:
++                return with_alpha || !inputs_have_alpha ? "vInput2" : "vInput2.rgb";
++            case SHADER_INPUT_3:
++                return with_alpha || !inputs_have_alpha ? "vInput3" : "vInput3.rgb";
++            case SHADER_INPUT_4:
++                return with_alpha || !inputs_have_alpha ? "vInput4" : "vInput4.rgb";
++            case SHADER_TEXEL0:
++                return first_cycle ? (with_alpha ? "texVal0" : "texVal0.rgb")
++                                   : (with_alpha ? "texVal1" : "texVal1.rgb");
++            case SHADER_TEXEL0A:
++                return first_cycle
++                           ? (hint_single_element ? "texVal0.a"
++                                                  : (with_alpha ? "vec4(texVal0.a, texVal0.a, texVal0.a, texVal0.a)"
++                                                                : "vec3(texVal0.a, texVal0.a, texVal0.a)"))
++                           : (hint_single_element ? "texVal1.a"
++                                                  : (with_alpha ? "vec4(texVal1.a, texVal1.a, texVal1.a, texVal1.a)"
++                                                                : "vec3(texVal1.a, texVal1.a, texVal1.a)"));
++            case SHADER_TEXEL1A:
++                return first_cycle
++                           ? (hint_single_element ? "texVal1.a"
++                                                  : (with_alpha ? "vec4(texVal1.a, texVal1.a, texVal1.a, texVal1.a)"
++                                                                : "vec3(texVal1.a, texVal1.a, texVal1.a)"))
++                           : (hint_single_element ? "texVal0.a"
++                                                  : (with_alpha ? "vec4(texVal0.a, texVal0.a, texVal0.a, texVal0.a)"
++                                                                : "vec3(texVal0.a, texVal0.a, texVal0.a)"));
++            case SHADER_TEXEL1:
++                return first_cycle ? (with_alpha ? "texVal1" : "texVal1.rgb")
++                                   : (with_alpha ? "texVal0" : "texVal0.rgb");
++            case SHADER_COMBINED:
++                return with_alpha ? "texel" : "texel.rgb";
++            case SHADER_NOISE:
++                return with_alpha ? "vec4(" RAND_NOISE ", " RAND_NOISE ", " RAND_NOISE ", " RAND_NOISE ")"
++                                  : "vec3(" RAND_NOISE ", " RAND_NOISE ", " RAND_NOISE ")";
++        }
++    } else {
++        switch (item) {
++            case SHADER_0:
++                return "0.0";
++            case SHADER_1:
++                return "1.0";
++            case SHADER_INPUT_1:
++                return "vInput1.a";
++            case SHADER_INPUT_2:
++                return "vInput2.a";
++            case SHADER_INPUT_3:
++                return "vInput3.a";
++            case SHADER_INPUT_4:
++                return "vInput4.a";
++            case SHADER_TEXEL0:
++                return first_cycle ? "texVal0.a" : "texVal1.a";
++            case SHADER_TEXEL0A:
++                return first_cycle ? "texVal0.a" : "texVal1.a";
++            case SHADER_TEXEL1A:
++                return first_cycle ? "texVal1.a" : "texVal0.a";
++            case SHADER_TEXEL1:
++                return first_cycle ? "texVal1.a" : "texVal0.a";
++            case SHADER_COMBINED:
++                return "texel.a";
++            case SHADER_NOISE:
++                return RAND_NOISE;
++        }
++    }
++    return "";
++}
++
++bool get_bool(prism::ContextTypes* value) {
++    if (std::holds_alternative<int>(*value)) {
++        return std::get<int>(*value) == 1;
++    }
++    return false;
++}
++
++prism::ContextTypes* append_formula(prism::ContextTypes* _, prism::ContextTypes* a_arg, prism::ContextTypes* a_single,
++                                    prism::ContextTypes* a_mult, prism::ContextTypes* a_mix,
++                                    prism::ContextTypes* a_with_alpha, prism::ContextTypes* a_only_alpha,
++                                    prism::ContextTypes* a_alpha, prism::ContextTypes* a_first_cycle) {
++    auto c = std::get<prism::MTDArray<int>>(*a_arg);
++    bool do_single = get_bool(a_single);
++    bool do_multiply = get_bool(a_mult);
++    bool do_mix = get_bool(a_mix);
++    bool with_alpha = get_bool(a_with_alpha);
++    bool only_alpha = get_bool(a_only_alpha);
++    bool opt_alpha = get_bool(a_alpha);
++    bool first_cycle = get_bool(a_first_cycle);
++    std::string out = "";
++    if (do_single) {
++        out += shader_item_to_str(c.at(only_alpha, 3), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++    } else if (do_multiply) {
++        out += shader_item_to_str(c.at(only_alpha, 0), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++        out += " * ";
++        out += shader_item_to_str(c.at(only_alpha, 2), with_alpha, only_alpha, opt_alpha, first_cycle, true);
++    } else if (do_mix) {
++        out += "mix(";
++        out += shader_item_to_str(c.at(only_alpha, 1), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++        out += ", ";
++        out += shader_item_to_str(c.at(only_alpha, 0), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++        out += ", ";
++        out += shader_item_to_str(c.at(only_alpha, 2), with_alpha, only_alpha, opt_alpha, first_cycle, true);
++        out += ")";
++    } else {
++        out += "(";
++        out += shader_item_to_str(c.at(only_alpha, 0), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++        out += " - ";
++        out += shader_item_to_str(c.at(only_alpha, 1), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++        out += ") * ";
++        out += shader_item_to_str(c.at(only_alpha, 2), with_alpha, only_alpha, opt_alpha, first_cycle, true);
++        out += " + ";
++        out += shader_item_to_str(c.at(only_alpha, 3), with_alpha, only_alpha, opt_alpha, first_cycle, false);
++    }
++    return new prism::ContextTypes{ out };
++}
++
++std::optional<std::string> opengl_include_fs(const std::string& path) {
++    auto init = std::make_shared<Ship::ResourceInitData>();
++    init->Type = (uint32_t)Ship::ResourceType::Shader;
++    init->ByteOrder = Ship::Endianness::Native;
++    init->Format = RESOURCE_FORMAT_BINARY;
++    auto res = std::static_pointer_cast<Ship::Shader>(
++        Ship::Context::GetRawInstance()->GetResourceManager()->LoadResource(path, true, init));
++    if (res == nullptr) {
++        return std::nullopt;
++    }
++    auto inc = static_cast<std::string*>(res->GetRawPointer());
++    return *inc;
++}
++
++std::string GfxRenderingAPIOGL::BuildFsShader(const CCFeatures& cc_features) {
++    prism::Processor processor;
++    prism::ContextItems mContext = {
++        { "o_c", M_ARRAY(cc_features.c, int, 2, 2, 4) },
++        { "o_alpha", cc_features.opt_alpha },
++        { "o_fog", cc_features.opt_fog },
++        { "o_texture_edge", cc_features.opt_texture_edge },
++        { "o_noise", cc_features.opt_noise },
++        { "o_2cyc", cc_features.opt_2cyc },
++        { "o_alpha_threshold", cc_features.opt_alpha_threshold },
++        { "o_invisible", cc_features.opt_invisible },
++        { "o_grayscale", cc_features.opt_grayscale },
++        { "o_prim_depth", cc_features.opt_prim_depth },
++        { "o_textures", M_ARRAY(cc_features.usedTextures, bool, 2) },
++        { "o_masks", M_ARRAY(cc_features.used_masks, bool, 2) },
++        { "o_blend", M_ARRAY(cc_features.used_blend, bool, 2) },
++        { "o_clamp", M_ARRAY(cc_features.clamp, bool, 2, 2) },
++        { "o_inputs", cc_features.numInputs },
++        { "o_do_mix", M_ARRAY(cc_features.do_mix, bool, 2, 2) },
++        { "o_do_single", M_ARRAY(cc_features.do_single, bool, 2, 2) },
++        { "o_do_multiply", M_ARRAY(cc_features.do_multiply, bool, 2, 2) },
++        { "o_color_alpha_same", M_ARRAY(cc_features.color_alpha_same, bool, 2) },
++        { "FILTER_THREE_POINT", FILTER_THREE_POINT },
++        { "FILTER_LINEAR", FILTER_LINEAR },
++        { "FILTER_NONE", FILTER_NONE },
++        { "srgb_mode", mSrgbMode },
++        { "SHADER_0", SHADER_0 },
++        { "SHADER_INPUT_1", SHADER_INPUT_1 },
++        { "SHADER_INPUT_2", SHADER_INPUT_2 },
++        { "SHADER_INPUT_3", SHADER_INPUT_3 },
++        { "SHADER_INPUT_4", SHADER_INPUT_4 },
++        { "SHADER_INPUT_5", SHADER_INPUT_5 },
++        { "SHADER_INPUT_6", SHADER_INPUT_6 },
++        { "SHADER_INPUT_7", SHADER_INPUT_7 },
++        { "SHADER_TEXEL0", SHADER_TEXEL0 },
++        { "SHADER_TEXEL0A", SHADER_TEXEL0A },
++        { "SHADER_TEXEL1", SHADER_TEXEL1 },
++        { "SHADER_TEXEL1A", SHADER_TEXEL1A },
++        { "SHADER_1", SHADER_1 },
++        { "SHADER_COMBINED", SHADER_COMBINED },
++        { "SHADER_NOISE", SHADER_NOISE },
++        { "o_three_point_filtering", mCurrentFilterMode == FILTER_THREE_POINT },
++        { "append_formula", (InvokeFunc)append_formula },
++        { "GLSL_VERSION", "precision mediump float;" },
++        { "attr", "varying" },
++        { "opengles", false },
++        { "core_opengl", false },
++        { "texture", "texture2D" },
++        { "vOutColor", "gl_FragColor" },
++    };
++    processor.populate(mContext);
++    processor.load(std::string(gPs4FragmentShaderTemplate));
++    processor.bind_include_loader(opengl_include_fs);
++    auto result = processor.process();
++    // SPDLOG_INFO("=========== FRAGMENT SHADER ============");
++    // SPDLOG_INFO(result);
++    // SPDLOG_INFO("========================================");
++    return result;
++}
++
++static size_t numFloats = 0;
++
++static prism::ContextTypes* UpdateFloats(prism::ContextTypes* _, prism::ContextTypes* num) {
++    numFloats += std::get<int>(*num);
++    return nullptr;
++}
++
++static std::string BuildVsShader(const CCFeatures& cc_features) {
++    numFloats = 4;
++    prism::Processor processor;
++    prism::ContextItems mContext = { { "o_textures", M_ARRAY(cc_features.usedTextures, bool, 2) },
++                                     { "o_clamp", M_ARRAY(cc_features.clamp, bool, 2, 2) },
++                                     { "o_fog", cc_features.opt_fog },
++                                     { "o_grayscale", cc_features.opt_grayscale },
++                                     { "o_prim_depth", cc_features.opt_prim_depth },
++                                     { "o_alpha", cc_features.opt_alpha },
++                                     { "o_inputs", cc_features.numInputs },
++                                     { "update_floats", (InvokeFunc)UpdateFloats },
++                                     { "GLSL_VERSION", "" },
++                                     { "attr", "attribute" },
++                                     { "out", "varying" },
++                                     { "opengles", true } };
++    processor.populate(mContext);
++
++    processor.load(std::string(gPs4VertexShaderTemplate));
++    processor.bind_include_loader(opengl_include_fs);
++    auto result = processor.process();
++    // SPDLOG_INFO("=========== VERTEX SHADER ============");
++    // SPDLOG_INFO(result);
++    // SPDLOG_INFO("========================================");
++    return result;
++}
++
++static void Ps4LogShaderSource(const std::string& source) {
++    size_t lineNumber = 1;
++    size_t start = 0;
++    while (start < source.size()) {
++        size_t end = source.find('\n', start);
++        if (end == std::string::npos) {
++            end = source.size();
++        }
++        SPDLOG_ERROR("{:4}: {}", lineNumber++, source.substr(start, end - start));
++        start = end + 1;
++    }
++}
++
++static GLuint Ps4CompileShader(GLenum type, const std::string& source, const char* what) {
++    const GLchar* src = source.data();
++    const GLint length = (GLint)source.size();
++    GLint success = GL_FALSE;
++
++    GLuint shader = glCreateShader(type);
++    glShaderSource(shader, 1, &src, &length);
++    glCompileShader(shader);
++    glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
++    if (!success) {
++        char errorLog[2048] = { 0 };
++        GLsizei logLength = 0;
++        glGetShaderInfoLog(shader, sizeof(errorLog) - 1, &logLength, errorLog);
++        SPDLOG_ERROR("[PS4] {} shader compilation failed: {}", what, errorLog);
++        Ps4LogShaderSource(source);
++        spdlog::default_logger()->flush();
++        abort();
++    }
++    return shader;
++}
++
++static GLuint Ps4LinkProgram(GLuint vertexShader, GLuint fragmentShader) {
++    GLint success = GL_FALSE;
++    GLuint program = glCreateProgram();
++    glAttachShader(program, vertexShader);
++    glAttachShader(program, fragmentShader);
++    glLinkProgram(program);
++    glGetProgramiv(program, GL_LINK_STATUS, &success);
++    if (!success) {
++        char errorLog[2048] = { 0 };
++        GLsizei logLength = 0;
++        glGetProgramInfoLog(program, sizeof(errorLog) - 1, &logLength, errorLog);
++        SPDLOG_ERROR("[PS4] shader program link failed: {}", errorLog);
++        spdlog::default_logger()->flush();
++        abort();
++    }
++    return program;
++}
++
++// ---------------------------------------------------------------------------------------------
++// Shader warm-up list
++//
++// Compiling a shader pair with Sony's runtime compiler takes around 200 ms, a visible hitch every
++// time the game uses a new color combiner. Piglet doesn't hand out program binaries
++// (GL_PROGRAM_BINARY_LENGTH is rejected), so they can't be cached on disk. Instead the ids of
++// every combiner the game has ever asked for are remembered in a text file and compiled up front
++// at the next start, behind the system's splash screen.
++// ---------------------------------------------------------------------------------------------
++
++static bool sWarmingUp = false;
++static constexpr size_t kMaxWarmUpShaders = 512;
++
++static std::string Ps4ShaderListPath() {
++    return Ship::Context::GetPathRelativeToAppDirectory("ps4_shaders.txt");
++}
++
++static void Ps4RememberShader(uint64_t shaderId0, uint64_t shaderId1) {
++    if (sWarmingUp) {
++        return;
++    }
++    FILE* file = fopen(Ps4ShaderListPath().c_str(), "a");
++    if (file != nullptr) {
++        fprintf(file, "%016llx %016llx\n", (unsigned long long)shaderId0, (unsigned long long)shaderId1);
++        fclose(file);
++    }
++}
++
++void GfxRenderingAPIOGL::WarmUpShaders() {
++    std::vector<std::pair<uint64_t, uint64_t>> ids;
++    FILE* file = fopen(Ps4ShaderListPath().c_str(), "r");
++    if (file != nullptr) {
++        unsigned long long id0 = 0;
++        unsigned long long id1 = 0;
++        while (ids.size() < kMaxWarmUpShaders && fscanf(file, "%llx %llx", &id0, &id1) == 2) {
++            ids.emplace_back((uint64_t)id0, (uint64_t)id1);
++        }
++        fclose(file);
++    }
++    if (ids.empty()) {
++        SPDLOG_INFO("[PS4] no shader list yet, shaders will be compiled as the game needs them");
++        return;
++    }
++
++    const Uint64 start = SDL_GetPerformanceCounter();
++    size_t compiled = 0;
++    sWarmingUp = true;
++    for (const auto& id : ids) {
++        if (LookupShader(id.first, id.second) == nullptr) {
++            CreateAndLoadNewShader(id.first, id.second);
++            compiled++;
++        }
++    }
++    sWarmingUp = false;
++    UnloadShader(mLastLoadedShader);
++
++    const double seconds = (double)(SDL_GetPerformanceCounter() - start) / (double)SDL_GetPerformanceFrequency();
++    SPDLOG_INFO("[PS4] warmed up {} shaders in {:.1f} s", compiled, seconds);
++}
++
++void GfxRenderingAPIOGL::ClearShaderCache() {
++    // Called when the game changes shader options. Free the programs too: Piglet memory is tight.
++    for (auto& entry : mShaderProgramPool) {
++        glDeleteProgram(entry.second.openglProgramId);
++    }
++    mShaderProgramPool.clear();
++    mCurrentShaderProgram = nullptr;
++    mLastLoadedShader = nullptr;
++}
++
++ShaderProgram* GfxRenderingAPIOGL::CreateAndLoadNewShader(uint64_t shader_id0, uint64_t shader_id1) {
++    CCFeatures cc_features;
++    gfx_cc_get_features(shader_id0, shader_id1, &cc_features);
++    if (cc_features.shader_id != 0 && Fast::gfx_get_shader(cc_features.shader_id) != nullptr) {
++        // Custom shaders pushed by mods are desktop GLSL and can't run on Piglet.
++        static bool sWarned = false;
++        if (!sWarned) {
++            sWarned = true;
++            SPDLOG_WARN("[PS4] custom shader {} requested, using the default one", cc_features.shader_id);
++        }
++    }
++    const auto fs_buf = BuildFsShader(cc_features);
++    const auto vs_buf = BuildVsShader(cc_features);
++    // Runtime compilation goes through Sony's shader compiler module and is not fast: keep a
++    // trace of how many shaders the game asked for and how long each one took.
++    static int sShaderCount = 0;
++    const Uint64 compileStart = SDL_GetPerformanceCounter();
++    GLuint vertex_shader = Ps4CompileShader(GL_VERTEX_SHADER, vs_buf, "vertex");
++    GLuint fragment_shader = Ps4CompileShader(GL_FRAGMENT_SHADER, fs_buf, "fragment");
++    GLuint shader_program = Ps4LinkProgram(vertex_shader, fragment_shader);
++    const double compileMs =
++        (double)(SDL_GetPerformanceCounter() - compileStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
++    ++sShaderCount;
++    if (!sWarmingUp) {
++        // Only the ones that still interrupted the game are worth a line in the log.
++        SPDLOG_INFO("[PS4] shader #{} ({:016X}/{:016X}) compiled while playing in {:.1f} ms", sShaderCount, shader_id0,
++                    shader_id1, compileMs);
++    }
++    Ps4RememberShader(shader_id0, shader_id1);
++
++    size_t cnt = 0;
++
++    struct ShaderProgram* prg = &mShaderProgramPool[std::make_pair(shader_id0, shader_id1)];
++    prg->attribLocations[cnt] = glGetAttribLocation(shader_program, "aVtxPos");
++    prg->attribSizes[cnt] = 4;
++    ++cnt;
++
++    for (int i = 0; i < 2; i++) {
++        if (cc_features.usedTextures[i]) {
++            char name[32];
++            snprintf(name, sizeof(name), "aTexCoord%d", i);
++            prg->attribLocations[cnt] = glGetAttribLocation(shader_program, name);
++            prg->attribSizes[cnt] = 2;
++            ++cnt;
++
++            for (int j = 0; j < 2; j++) {
++                if (cc_features.clamp[i][j]) {
++                    snprintf(name, sizeof(name), "aTexClamp%s%d", j == 0 ? "S" : "T", i);
++                    prg->attribLocations[cnt] = glGetAttribLocation(shader_program, name);
++                    prg->attribSizes[cnt] = 1;
++                    ++cnt;
++                }
++            }
++        }
++    }
++
++    if (cc_features.opt_fog) {
++        prg->attribLocations[cnt] = glGetAttribLocation(shader_program, "aFog");
++        prg->attribSizes[cnt] = 4;
++        ++cnt;
++    }
++
++    if (cc_features.opt_grayscale) {
++        prg->attribLocations[cnt] = glGetAttribLocation(shader_program, "aGrayscaleColor");
++        prg->attribSizes[cnt] = 4;
++        ++cnt;
++    }
++
++    for (int i = 0; i < cc_features.numInputs; i++) {
++        char name[16];
++        snprintf(name, sizeof(name), "aInput%d", i + 1);
++        prg->attribLocations[cnt] = glGetAttribLocation(shader_program, name);
++        prg->attribSizes[cnt] = cc_features.opt_alpha ? 4 : 3;
++        ++cnt;
++    }
++
++    prg->openglProgramId = shader_program;
++    prg->numInputs = cc_features.numInputs;
++    prg->usedTextures[0] = cc_features.usedTextures[0];
++    prg->usedTextures[1] = cc_features.usedTextures[1];
++    prg->usedTextures[2] = cc_features.used_masks[0];
++    prg->usedTextures[3] = cc_features.used_masks[1];
++    prg->usedTextures[4] = cc_features.used_blend[0];
++    prg->usedTextures[5] = cc_features.used_blend[1];
++    prg->numFloats = numFloats;
++    prg->numAttribs = cnt;
++
++    prg->frameCountLocation = glGetUniformLocation(shader_program, "frame_count");
++    prg->noiseScaleLocation = glGetUniformLocation(shader_program, "noise_scale");
++    prg->prim_depth_location = glGetUniformLocation(shader_program, "prim_depth");
++    prg->texture_width_location = glGetUniformLocation(shader_program, "texture_width");
++    prg->texture_height_location = glGetUniformLocation(shader_program, "texture_height");
++    prg->texture_filtering_location = glGetUniformLocation(shader_program, "texture_filtering");
++
++    LoadShader(prg);
++
++    if (cc_features.usedTextures[0]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTex0");
++        glUniform1i(sampler_location, 0);
++    }
++    if (cc_features.usedTextures[1]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTex1");
++        glUniform1i(sampler_location, 1);
++    }
++    if (cc_features.used_masks[0]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTexMask0");
++        glUniform1i(sampler_location, 2);
++    }
++    if (cc_features.used_masks[1]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTexMask1");
++        glUniform1i(sampler_location, 3);
++    }
++    if (cc_features.used_blend[0]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTexBlend0");
++        glUniform1i(sampler_location, 4);
++    }
++    if (cc_features.used_blend[1]) {
++        GLint sampler_location = glGetUniformLocation(shader_program, "uTexBlend1");
++        glUniform1i(sampler_location, 5);
++    }
++
++    return prg;
++}
++
++struct ShaderProgram* GfxRenderingAPIOGL::LookupShader(uint64_t shader_id0, uint64_t shader_id1) {
++    auto it = mShaderProgramPool.find(std::make_pair(shader_id0, shader_id1));
++    return it == mShaderProgramPool.end() ? nullptr : &it->second;
++}
++
++void GfxRenderingAPIOGL::ShaderGetInfo(struct ShaderProgram* prg, uint8_t* numInputs, bool usedTextures[2]) {
++    *numInputs = prg->numInputs;
++    usedTextures[0] = prg->usedTextures[0];
++    usedTextures[1] = prg->usedTextures[1];
++}
++
++GLuint GfxRenderingAPIOGL::NewTexture() {
++    GLuint ret;
++    glGenTextures(1, &ret);
++    textures.resize(std::max(textures.size(), (size_t)ret + 1));
++    return ret;
++}
++
++void GfxRenderingAPIOGL::DeleteTexture(uint32_t texID) {
++    glDeleteTextures(1, &texID);
++}
++
++void GfxRenderingAPIOGL::SelectTexture(int tile, GLuint texture_id) {
++    if (mLastActiveTexture != tile) {
++        mLastActiveTexture = tile;
++        glActiveTexture(GL_TEXTURE0 + tile);
++    }
++    if (mLastBoundTextures[tile] != texture_id) {
++        mLastBoundTextures[tile] = texture_id;
++        glBindTexture(GL_TEXTURE_2D, texture_id);
++    }
++    mCurrentTextureIds[tile] = texture_id;
++    mCurrentTile = tile;
++}
++
++void GfxRenderingAPIOGL::UploadTexture(const uint8_t* rgba32_buf, uint32_t width, uint32_t height) {
++    if (width == 0 || height == 0) {
++        return;
++    }
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba32_buf);
++    textures[mCurrentTextureIds[mCurrentTile]].width = width;
++    textures[mCurrentTextureIds[mCurrentTile]].height = height;
++}
++
++// GLES2 has no mirror-clamp wrap mode. The fragment shader already clamps the coordinates
++// when the N64 tile asks for it, so a mirrored repeat gives the same picture.
++#undef GL_MIRROR_CLAMP_TO_EDGE
++#define GL_MIRROR_CLAMP_TO_EDGE GL_MIRRORED_REPEAT
++
++static uint32_t gfx_cm_to_opengl(uint32_t val) {
++    switch (val) {
++        case G_TX_NOMIRROR | G_TX_CLAMP:
++            return GL_CLAMP_TO_EDGE;
++        case G_TX_MIRROR | G_TX_WRAP:
++            return GL_MIRRORED_REPEAT;
++        case G_TX_MIRROR | G_TX_CLAMP:
++            return GL_MIRROR_CLAMP_TO_EDGE;
++        case G_TX_NOMIRROR | G_TX_WRAP:
++            return GL_REPEAT;
++    }
++    return 0;
++}
++
++void GfxRenderingAPIOGL::SetSamplerParameters(int tile, bool linear_filter, uint32_t cms, uint32_t cmt) {
++    if (mLastActiveTexture != tile) {
++        mLastActiveTexture = tile;
++        glActiveTexture(GL_TEXTURE0 + tile);
++    }
++    const GLint filter = linear_filter && mCurrentFilterMode == FILTER_LINEAR ? GL_LINEAR : GL_NEAREST;
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
++    textures[mCurrentTextureIds[tile]].filtering = !linear_filter ? FILTER_LINEAR : FILTER_THREE_POINT;
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, gfx_cm_to_opengl(cms));
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, gfx_cm_to_opengl(cmt));
++}
++
++void GfxRenderingAPIOGL::SetCurrentPrimDepth(float depth) {
++    if (depth != mCurrentPrimDepth) {
++        mCurrentPrimDepth = depth;
++        mPrimDepthDirty = true;
++    }
++}
++
++void GfxRenderingAPIOGL::SetDepthTestAndMask(bool depth_test, bool z_upd) {
++    mCurrentDepthTest = depth_test;
++    mCurrentDepthMask = z_upd;
++}
++
++void GfxRenderingAPIOGL::SetZmodeDecal(bool zmode_decal) {
++    mCurrentZmodeDecal = zmode_decal;
++}
++
++void GfxRenderingAPIOGL::SetViewport(int x, int y, int width, int height) {
++    glViewport(x, y, width, height);
++}
++
++void GfxRenderingAPIOGL::SetScissor(int x, int y, int width, int height) {
++    glScissor(x, y, width, height);
++    mLastScissorX = x;
++    mLastScissorY = y;
++    mLastScissorW = width;
++    mLastScissorH = height;
++}
++
++void GfxRenderingAPIOGL::SetUseAlpha(bool use_alpha) {
++    int8_t val = use_alpha ? 1 : 0;
++    if (mLastBlendEnabled != val) {
++        mLastBlendEnabled = val;
++        if (use_alpha) {
++            glEnable(GL_BLEND);
++        } else {
++            glDisable(GL_BLEND);
++        }
++    }
++}
++
++void GfxRenderingAPIOGL::DrawTriangles(float buf_vbo[], size_t buf_vbo_len, size_t buf_vbo_num_tris) {
++    if (mCurrentDepthTest != mLastDepthTest || mCurrentDepthMask != mLastDepthMask) {
++        mLastDepthTest = mCurrentDepthTest;
++        mLastDepthMask = mCurrentDepthMask;
++
++        if (mCurrentDepthTest || mLastDepthMask) {
++            glEnable(GL_DEPTH_TEST);
++            glDepthMask(mLastDepthMask ? GL_TRUE : GL_FALSE);
++            glDepthFunc(mCurrentDepthTest ? (mCurrentZmodeDecal ? GL_LEQUAL : GL_LESS) : GL_ALWAYS);
++        } else {
++            glDisable(GL_DEPTH_TEST);
++        }
++    }
++
++    if (mCurrentZmodeDecal != mLastZmodeDecal) {
++        mLastZmodeDecal = mCurrentZmodeDecal;
++        if (mCurrentZmodeDecal) {
++            // SSDB = SlopeScaledDepthBias 120 leads to -2 at 240p which is the same as N64 mode which has very little
++            // fighting
++            const int n64modeFactor = 120;
++            const int noVanishFactor = 100;
++            GLfloat SSDB = -2;
++            switch (Ship::Context::GetRawInstance()->GetConsoleVariables()->GetInteger(CVAR_Z_FIGHTING_MODE, 0)) {
++                // scaled z-fighting (N64 mode like)
++                case 1:
++                    if (mFrameBuffers.size() >
++                        mCurrentFrameBuffer) { // safety check for vector size can probably be removed
++                        SSDB = -1.0f * (GLfloat)mFrameBuffers[mCurrentFrameBuffer].height / n64modeFactor;
++                    }
++                    break;
++                // no vanishing paths
++                case 2:
++                    if (mFrameBuffers.size() >
++                        mCurrentFrameBuffer) { // safety check for vector size can probably be removed
++                        SSDB = -1.0f * (GLfloat)mFrameBuffers[mCurrentFrameBuffer].height / noVanishFactor;
++                    }
++                    break;
++                // disabled
++                case 0:
++                default:
++                    SSDB = -2;
++            }
++            glPolygonOffset(SSDB, -2);
++            glEnable(GL_POLYGON_OFFSET_FILL);
++        } else {
++            glPolygonOffset(0, 0);
++            glDisable(GL_POLYGON_OFFSET_FILL);
++        }
++    }
++
++    SetPerDrawUniforms();
++
++    // printf("flushing %d tris\n", buf_vbo_num_tris);
++    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * buf_vbo_len, buf_vbo, GL_STREAM_DRAW);
++    glDrawArrays(GL_TRIANGLES, 0, 3 * buf_vbo_num_tris);
++}
++
++// Depth/stencil storage used by offscreen framebuffers. Picked once from the extension list and
++// downgraded at runtime if Piglet reports an incomplete framebuffer with it.
++static GLenum sDepthFormat = GL_DEPTH_COMPONENT16;
++static bool sPackedDepthStencil = false;
++
++static bool Ps4HasExtension(const char* name) {
++    const char* extensions = (const char*)glGetString(GL_EXTENSIONS);
++    return extensions != nullptr && strstr(extensions, name) != nullptr;
++}
++
++static void Ps4AttachDepth(GLuint rbo) {
++    glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rbo);
++    if (sPackedDepthStencil) {
++        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT, GL_RENDERBUFFER, rbo);
++    }
++}
++
++static const char* Ps4GlString(GLenum name) {
++    const char* str = (const char*)glGetString(name);
++    return str != nullptr ? str : "(null)";
++}
++
++// Texture bindings are cached by SelectTexture(), so anything that binds a texture behind its
++// back has to put the previous one back.
++#define PS4_RESTORE_TEXTURE_BINDING() \
++    glBindTexture(GL_TEXTURE_2D, mLastActiveTexture >= 0 ? mLastBoundTextures[mLastActiveTexture] : 0)
++
++void GfxRenderingAPIOGL::Init() {
++    SPDLOG_INFO("[PS4] GL_VENDOR: {}", Ps4GlString(GL_VENDOR));
++    SPDLOG_INFO("[PS4] GL_RENDERER: {}", Ps4GlString(GL_RENDERER));
++    SPDLOG_INFO("[PS4] GL_VERSION: {}", Ps4GlString(GL_VERSION));
++    SPDLOG_INFO("[PS4] GL_SHADING_LANGUAGE_VERSION: {}", Ps4GlString(GL_SHADING_LANGUAGE_VERSION));
++    SPDLOG_INFO("[PS4] GL_EXTENSIONS: {}", Ps4GlString(GL_EXTENSIONS));
++
++    glGenBuffers(1, &mOpenglVbo);
++    glBindBuffer(GL_ARRAY_BUFFER, mOpenglVbo);
++
++    glDepthFunc(GL_LEQUAL);
++    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
++
++    mFrameBuffers.resize(1); // for the default screen buffer
++
++    if (Ps4HasExtension("GL_OES_packed_depth_stencil")) {
++        sDepthFormat = GL_DEPTH24_STENCIL8_OES;
++        sPackedDepthStencil = true;
++    } else if (Ps4HasExtension("GL_OES_depth24")) {
++        sDepthFormat = GL_DEPTH_COMPONENT24_OES;
++    } else if (Ps4HasExtension("GL_OES_depth32")) {
++        // What Piglet actually offers. 16 bits are not enough once clip space z has been squeezed
++        // (see the vertex shader), distant geometry z-fights.
++        sDepthFormat = GL_DEPTH_COMPONENT32_OES;
++    } else {
++        sDepthFormat = GL_DEPTH_COMPONENT16;
++    }
++    SPDLOG_INFO("[PS4] offscreen depth format: 0x{:04X}", (unsigned int)sDepthFormat);
++
++    // No multisampled renderbuffers on GLES2.
++    mMaxMsaaLevel = 1;
++
++    WarmUpShaders();
++    Ship::Ps4::HideSplashScreen();
++}
++
++void GfxRenderingAPIOGL::OnResize() {
++}
++
++void GfxRenderingAPIOGL::StartFrame() {
++    mFrameCount++;
++}
++
++void GfxRenderingAPIOGL::EndFrame() {
++    glFlush();
++}
++
++void GfxRenderingAPIOGL::FinishRender() {
++}
++
++int GfxRenderingAPIOGL::CreateFramebuffer() {
++    GLuint clrbuf;
++    glGenTextures(1, &clrbuf);
++    glBindTexture(GL_TEXTURE_2D, clrbuf);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, 1, 1, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    // Framebuffer textures are rarely power-of-two sized, which GLES2 only guarantees with clamping.
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    PS4_RESTORE_TEXTURE_BINDING();
++
++    GLuint rbo;
++    glGenRenderbuffers(1, &rbo);
++    glBindRenderbuffer(GL_RENDERBUFFER, rbo);
++    glRenderbufferStorage(GL_RENDERBUFFER, sDepthFormat, 1, 1);
++    glBindRenderbuffer(GL_RENDERBUFFER, 0);
++
++    GLuint fbo;
++    glGenFramebuffers(1, &fbo);
++
++    size_t i = mFrameBuffers.size();
++    mFrameBuffers.resize(i + 1);
++
++    mFrameBuffers[i].fbo = fbo;
++    mFrameBuffers[i].clrbuf = clrbuf;
++    mFrameBuffers[i].clrbufMsaa = 0;
++    mFrameBuffers[i].rbo = rbo;
++
++    textures.resize(std::max(textures.size(), (size_t)clrbuf + 1));
++
++    return i;
++}
++
++void GfxRenderingAPIOGL::UpdateFramebufferParameters(int fb_id, uint32_t width, uint32_t height, uint32_t msaa_level,
++                                                     bool opengl_invertY, bool render_target, bool has_depth_buffer,
++                                                     bool can_extract_depth) {
++    FramebufferOGL& fb = mFrameBuffers[fb_id];
++
++    width = std::max(width, 1U);
++    height = std::max(height, 1U);
++    msaa_level = 1;
++
++    glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
++
++    if (fb_id != 0) {
++        const bool sizeChanged = fb.width != width || fb.height != height;
++
++        if (sizeChanged) {
++            glBindTexture(GL_TEXTURE_2D, fb.clrbuf);
++            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
++            PS4_RESTORE_TEXTURE_BINDING();
++            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fb.clrbuf, 0);
++
++            if (fb.clrbuf < textures.size()) {
++                textures[fb.clrbuf].width = width;
++                textures[fb.clrbuf].height = height;
++            }
++        }
++
++        if (has_depth_buffer && (sizeChanged || !fb.has_depth_buffer)) {
++            glBindRenderbuffer(GL_RENDERBUFFER, fb.rbo);
++            glRenderbufferStorage(GL_RENDERBUFFER, sDepthFormat, width, height);
++            glBindRenderbuffer(GL_RENDERBUFFER, 0);
++        }
++
++        if (!fb.has_depth_buffer && has_depth_buffer) {
++            Ps4AttachDepth(fb.rbo);
++        } else if (fb.has_depth_buffer && !has_depth_buffer) {
++            Ps4AttachDepth(0);
++        }
++
++        if (sizeChanged || fb.has_depth_buffer != has_depth_buffer) {
++            GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++            if (status != GL_FRAMEBUFFER_COMPLETE && has_depth_buffer && sDepthFormat != GL_DEPTH_COMPONENT16) {
++                SPDLOG_WARN("[PS4] framebuffer {} incomplete (0x{:04X}) with depth format 0x{:04X}, using 16 bit depth",
++                            fb_id, (unsigned int)status, (unsigned int)sDepthFormat);
++                Ps4AttachDepth(0);
++                sDepthFormat = GL_DEPTH_COMPONENT16;
++                sPackedDepthStencil = false;
++                glBindRenderbuffer(GL_RENDERBUFFER, fb.rbo);
++                glRenderbufferStorage(GL_RENDERBUFFER, sDepthFormat, width, height);
++                glBindRenderbuffer(GL_RENDERBUFFER, 0);
++                Ps4AttachDepth(fb.rbo);
++                status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++            }
++            if (status != GL_FRAMEBUFFER_COMPLETE) {
++                SPDLOG_ERROR("[PS4] framebuffer {} ({}x{}) is incomplete: 0x{:04X}", fb_id, width, height,
++                             (unsigned int)status);
++            }
++        }
++    }
++
++    fb.width = width;
++    fb.height = height;
++    fb.has_depth_buffer = has_depth_buffer;
++    fb.msaa_level = msaa_level;
++    fb.invertY = opengl_invertY;
++}
++
++void GfxRenderingAPIOGL::StartDrawToFramebuffer(int fb_id, float noise_scale) {
++    FramebufferOGL& fb = mFrameBuffers[fb_id];
++
++    if (noise_scale != 0.0f) {
++        mCurrentNoiseScale = 1.0f / noise_scale;
++    }
++    glBindFramebuffer(GL_FRAMEBUFFER, fb.fbo);
++    mCurrentFrameBuffer = fb_id;
++}
++
++void GfxRenderingAPIOGL::ClearFramebuffer(bool color, bool depth) {
++    if (mLastScissorEnabled != 0) {
++        mLastScissorEnabled = 0;
++        glDisable(GL_SCISSOR_TEST);
++    }
++    glDepthMask(GL_TRUE);
++    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
++    glClear((color ? GL_COLOR_BUFFER_BIT : 0) | (depth ? GL_DEPTH_BUFFER_BIT : 0));
++    glDepthMask(mCurrentDepthMask ? GL_TRUE : GL_FALSE);
++    if (mLastScissorEnabled != 1) {
++        mLastScissorEnabled = 1;
++        glEnable(GL_SCISSOR_TEST);
++    }
++}
++
++void GfxRenderingAPIOGL::ClearDepthRegion(int x, int y, int w, int h) {
++    // Same as the desktop renderer, but with the scissor state tracked in mLastScissorEnabled
++    // (glGet* round trips are slow on Piglet).
++    glEnable(GL_SCISSOR_TEST);
++    glScissor(x, y, w, h);
++    glDepthMask(GL_TRUE);
++    glClear(GL_DEPTH_BUFFER_BIT);
++    glDepthMask(mCurrentDepthMask ? GL_TRUE : GL_FALSE);
++    glScissor(mLastScissorX, mLastScissorY, mLastScissorW, mLastScissorH);
++    if (mLastScissorEnabled != 1) {
++        glDisable(GL_SCISSOR_TEST);
++    }
++}
++
++void GfxRenderingAPIOGL::ResolveMSAAColorBuffer(int fb_id_target, int fb_id_source) {
++    // MSAA is never enabled on PS4 (mMaxMsaaLevel == 1), nothing to resolve.
++}
++
++void* GfxRenderingAPIOGL::GetFramebufferTextureId(int fb_id) {
++    return (void*)(uintptr_t)mFrameBuffers[fb_id].clrbuf;
++}
++
++void GfxRenderingAPIOGL::SelectTextureFb(int fb_id) {
++    // glDisable(GL_DEPTH_TEST);
++    int tile = 0;
++    GLuint texId = mFrameBuffers[fb_id].clrbuf;
++    // FB color buffers are created outside NewTexture(), so the metadata vector may be too short.
++    if (texId >= textures.size()) {
++        textures.resize((size_t)texId + 1);
++    }
++    SelectTexture(tile, texId);
++}
++
++// Draws the [srcX0,srcX1]x[srcY0,srcY1] texel rectangle of `texture` over the
++// [dstX0,dstX1]x[dstY0,dstY1] pixel rectangle of `dstFbo`. Stand-in for glBlitFramebuffer, which
++// GLES2 lacks; like it, all coordinates have their origin at the bottom left.
++void GfxRenderingAPIOGL::BlitTexture(GLuint texture, int texWidth, int texHeight, int srcX0, int srcY0, int srcX1,
++                                     int srcY1, GLuint dstFbo, int dstX0, int dstY0, int dstX1, int dstY1) {
++    if (texWidth <= 0 || texHeight <= 0 || dstX0 == dstX1 || dstY0 == dstY1) {
++        return;
++    }
++
++    if (mBlitProgram == 0) {
++        static const std::string vs = "attribute vec2 aPos;\n"
++                                      "attribute vec2 aUv;\n"
++                                      "varying vec2 vUv;\n"
++                                      "void main() {\n"
++                                      "    vUv = aUv;\n"
++                                      "    gl_Position = vec4(aPos, 0.0, 1.0);\n"
++                                      "}\n";
++        static const std::string fs = "precision mediump float;\n"
++                                      "varying vec2 vUv;\n"
++                                      "uniform sampler2D uTex;\n"
++                                      "void main() {\n"
++                                      "    gl_FragColor = vec4(texture2D(uTex, vUv).rgb, 1.0);\n"
++                                      "}\n";
++        GLuint vertexShader = Ps4CompileShader(GL_VERTEX_SHADER, vs, "blit vertex");
++        GLuint fragmentShader = Ps4CompileShader(GL_FRAGMENT_SHADER, fs, "blit fragment");
++        mBlitProgram = Ps4LinkProgram(vertexShader, fragmentShader);
++        mBlitPosLocation = glGetAttribLocation(mBlitProgram, "aPos");
++        mBlitUvLocation = glGetAttribLocation(mBlitProgram, "aUv");
++        glUseProgram(mBlitProgram);
++        glUniform1i(glGetUniformLocation(mBlitProgram, "uTex"), 0);
++    }
++
++    // A mirrored destination rectangle is the same as a mirrored source one.
++    if (dstX1 < dstX0) {
++        std::swap(dstX0, dstX1);
++        std::swap(srcX0, srcX1);
++    }
++    if (dstY1 < dstY0) {
++        std::swap(dstY0, dstY1);
++        std::swap(srcY0, srcY1);
++    }
++
++    // Save the state the interpreter believes is still set.
++    GLint viewport[4];
++    glGetIntegerv(GL_VIEWPORT, viewport);
++    const GLboolean depthTestEnabled = glIsEnabled(GL_DEPTH_TEST);
++    const GLboolean blendEnabled = glIsEnabled(GL_BLEND);
++    const GLboolean scissorEnabled = glIsEnabled(GL_SCISSOR_TEST);
++    const GLboolean polygonOffsetEnabled = glIsEnabled(GL_POLYGON_OFFSET_FILL);
++    GLboolean depthMask = GL_TRUE;
++    glGetBooleanv(GL_DEPTH_WRITEMASK, &depthMask);
++
++    ShaderProgram* previousProgram = mLastLoadedShader;
++    if (previousProgram != nullptr) {
++        for (unsigned int i = 0; i < previousProgram->numAttribs; i++) {
++            if (previousProgram->attribLocations[i] >= 0) {
++                glDisableVertexAttribArray(previousProgram->attribLocations[i]);
++            }
++        }
++    }
++
++    glBindFramebuffer(GL_FRAMEBUFFER, dstFbo);
++    glDisable(GL_DEPTH_TEST);
++    glDisable(GL_BLEND);
++    glDisable(GL_SCISSOR_TEST);
++    glDisable(GL_POLYGON_OFFSET_FILL);
++    glDepthMask(GL_FALSE);
++    glViewport(dstX0, dstY0, dstX1 - dstX0, dstY1 - dstY0);
++
++    const float u0 = (float)srcX0 / (float)texWidth;
++    const float u1 = (float)srcX1 / (float)texWidth;
++    const float v0 = (float)srcY0 / (float)texHeight;
++    const float v1 = (float)srcY1 / (float)texHeight;
++    const float vertices[] = {
++        -1.0f, -1.0f, u0, v0, 1.0f, -1.0f, u1, v0, -1.0f, 1.0f, u0, v1,
++        1.0f,  -1.0f, u1, v0, 1.0f, 1.0f,  u1, v1, -1.0f, 1.0f, u0, v1,
++    };
++
++    glUseProgram(mBlitProgram);
++    glActiveTexture(GL_TEXTURE0);
++    glBindTexture(GL_TEXTURE_2D, texture);
++
++    // mOpenglVbo stays bound to GL_ARRAY_BUFFER for the whole lifetime of the renderer and
++    // DrawTriangles() re-uploads it on every draw, so it can be borrowed here.
++    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STREAM_DRAW);
++    glEnableVertexAttribArray(mBlitPosLocation);
++    glVertexAttribPointer(mBlitPosLocation, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
++    glEnableVertexAttribArray(mBlitUvLocation);
++    glVertexAttribPointer(mBlitUvLocation, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
++    glDrawArrays(GL_TRIANGLES, 0, 6);
++    glDisableVertexAttribArray(mBlitPosLocation);
++    glDisableVertexAttribArray(mBlitUvLocation);
++
++    // Restore.
++    glBindTexture(GL_TEXTURE_2D, mLastBoundTextures[0]);
++    if (mLastActiveTexture > 0) {
++        glActiveTexture(GL_TEXTURE0 + mLastActiveTexture);
++    }
++    if (previousProgram != nullptr) {
++        glUseProgram(previousProgram->openglProgramId);
++        VertexArraySetAttribs(previousProgram);
++    }
++    glViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
++    if (depthTestEnabled) {
++        glEnable(GL_DEPTH_TEST);
++    }
++    if (blendEnabled) {
++        glEnable(GL_BLEND);
++    }
++    if (scissorEnabled) {
++        glEnable(GL_SCISSOR_TEST);
++    }
++    if (polygonOffsetEnabled) {
++        glEnable(GL_POLYGON_OFFSET_FILL);
++    }
++    glDepthMask(depthMask);
++}
++
++void GfxRenderingAPIOGL::CopyFramebuffer(int fb_dst_id, int fb_src_id, int srcX0, int srcY0, int srcX1, int srcY1,
++                                         int dstX0, int dstY0, int dstX1, int dstY1) {
++    if (fb_dst_id >= (int)mFrameBuffers.size() || fb_src_id >= (int)mFrameBuffers.size()) {
++        return;
++    }
++
++    const FramebufferOGL src = mFrameBuffers[fb_src_id];
++    const FramebufferOGL dst = mFrameBuffers[fb_dst_id];
++
++    // Adjust y values for non-inverted source frame buffers because opengl uses bottom left for origin
++    if (!src.invertY) {
++        int temp = srcY1 - srcY0;
++        srcY1 = src.height - srcY0;
++        srcY0 = srcY1 - temp;
++    }
++
++    // Flip the y values
++    if (src.invertY != dst.invertY) {
++        std::swap(srcY0, srcY1);
++    }
++
++    GLuint srcTexture = src.clrbuf;
++    int srcWidth = src.width;
++    int srcHeight = src.height;
++
++    if (fb_src_id == 0) {
++        // The screen can't be sampled: grab the requested rectangle into a scratch texture first.
++        const int x0 = std::max(std::min(srcX0, srcX1), 0);
++        const int y0 = std::max(std::min(srcY0, srcY1), 0);
++        const int x1 = std::min(std::max(srcX0, srcX1), (int)src.width);
++        const int y1 = std::min(std::max(srcY0, srcY1), (int)src.height);
++        if (x1 <= x0 || y1 <= y0) {
++            return;
++        }
++
++        if (mLastActiveTexture != 0) {
++            glActiveTexture(GL_TEXTURE0);
++        }
++        if (mBlitScratchTexture == 0) {
++            glGenTextures(1, &mBlitScratchTexture);
++            glBindTexture(GL_TEXTURE_2D, mBlitScratchTexture);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++            textures.resize(std::max(textures.size(), (size_t)mBlitScratchTexture + 1));
++        } else {
++            glBindTexture(GL_TEXTURE_2D, mBlitScratchTexture);
++        }
++        glBindFramebuffer(GL_FRAMEBUFFER, 0);
++        glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, x0, y0, x1 - x0, y1 - y0, 0);
++        // BlitTexture() restores the texture unit/binding the interpreter expects.
++
++        srcTexture = mBlitScratchTexture;
++        srcWidth = x1 - x0;
++        srcHeight = y1 - y0;
++        srcX0 -= x0;
++        srcX1 -= x0;
++        srcY0 -= y0;
++        srcY1 -= y0;
++    }
++
++    BlitTexture(srcTexture, srcWidth, srcHeight, srcX0, srcY0, srcX1, srcY1, dst.fbo, dstX0, dstY0, dstX1, dstY1);
++
++    glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
++}
++
++void GfxRenderingAPIOGL::ReadFramebufferToCPU(int fb_id, uint32_t width, uint32_t height, uint16_t* rgba16_buf) {
++    if (fb_id >= (int)mFrameBuffers.size()) {
++        return;
++    }
++
++    // GLES2 only guarantees RGBA/UNSIGNED_BYTE read back, convert to RGBA5551 by hand.
++    std::vector<uint8_t> rgba32(static_cast<size_t>(width) * height * 4);
++
++    glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[fb_id].fbo);
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba32.data());
++    glBindFramebuffer(GL_FRAMEBUFFER, mFrameBuffers[mCurrentFrameBuffer].fbo);
++
++    const size_t pixels = static_cast<size_t>(width) * height;
++    for (size_t i = 0; i < pixels; i++) {
++        const uint8_t r = rgba32[i * 4 + 0];
++        const uint8_t g = rgba32[i * 4 + 1];
++        const uint8_t b = rgba32[i * 4 + 2];
++        const uint8_t a = rgba32[i * 4 + 3];
++        rgba16_buf[i] = (uint16_t)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7));
++    }
++}
++
++std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff>
++GfxRenderingAPIOGL::GetPixelDepth(int fb_id, const std::set<std::pair<float, float>>& coordinates) {
++    std::unordered_map<std::pair<float, float>, uint16_t, hash_pair_ff> res;
++
++    // The depth buffer can't be read back on GLES2. Report "nothing in front" so that light glows
++    // and lens flares, the only users of this, are always drawn.
++    for (const auto& coord : coordinates) {
++        res.emplace(coord, (uint16_t)0xFFFC);
++    }
++
++    return res;
++}
++
++void GfxRenderingAPIOGL::SetTextureFilter(FilteringMode mode) {
++    gfx_texture_cache_clear();
++    mCurrentFilterMode = mode;
++}
++
++FilteringMode GfxRenderingAPIOGL::GetTextureFilter() {
++    return mCurrentFilterMode;
++}
++
++void GfxRenderingAPIOGL::SetSrgbMode() {
++    mSrgbMode = true;
++}
++
++ImTextureID GfxRenderingAPIOGL::GetTextureById(int id) {
++    return reinterpret_cast<ImTextureID>(id);
++}
++} // namespace Fast
++#endif
+diff --git a/src/fast/backends/gfx_sdl2.cpp b/src/fast/backends/gfx_sdl2.cpp
+index 15c5415f..48613f2b 100644
+--- a/src/fast/backends/gfx_sdl2.cpp
++++ b/src/fast/backends/gfx_sdl2.cpp
+@@ -30,6 +30,10 @@
+ #include <SDL.h>
+ #include "fast/backends/gfx_metal.h"
+ #include "ship/utils/macUtils.h"
++#elif defined(__PS4__)
++// SDL only provides events/timing here (dummy video driver); the GL context comes from Piglet.
++#include <SDL2/SDL.h>
++#include "ship/port/ps4/Ps4Platform.h"
+ #else
+ #include <SDL2/SDL.h>
+ #define GL_GLEXT_PROTOTYPES 1
+@@ -215,6 +219,10 @@ GfxWindowBackendSDL2::~GfxWindowBackendSDL2() {
+ }
+ 
+ void GfxWindowBackendSDL2::SetFullscreenImpl(bool on, bool call_callback) {
++#ifdef __PS4__
++    // Always fullscreen.
++    return;
++#endif
+     if (mFullScreen == on) {
+         return;
+     }
+@@ -319,6 +327,15 @@ static LRESULT CALLBACK gfx_sdl_wnd_proc(HWND h_wnd, UINT message, WPARAM w_para
+ 
+ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bool startFullScreen, uint32_t width,
+                                 uint32_t height, int32_t posX, int32_t posY) {
++#ifdef __PS4__
++    // Piglet presents to a fixed 1080p window, whatever the config file says.
++    width = Ship::Ps4::kDisplayWidth;
++    height = Ship::Ps4::kDisplayHeight;
++    posX = 0;
++    posY = 0;
++    // The only video driver built into SDL for this platform; it has to be asked for by name.
++    SDL_SetHint(SDL_HINT_VIDEODRIVER, "dummy");
++#endif
+     mWindowWidth = width;
+     mWindowHeight = height;
+ 
+@@ -327,7 +344,12 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+ #endif
+ 
+-    SDL_Init(SDL_INIT_VIDEO);
++#ifdef __PS4__
++    SPDLOG_INFO("[PS4] window init: SDL_Init");
++#endif
++    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
++        SPDLOG_ERROR("SDL_Init(SDL_INIT_VIDEO) failed: {}", SDL_GetError());
++    }
+ 
+     SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+ 
+@@ -375,17 +397,28 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+ 
+ #ifdef __IOS__
+     Uint32 flags = SDL_WINDOW_BORDERLESS | SDL_WINDOW_SHOWN;
++#elif defined(__PS4__)
++    // A plain window on the dummy driver: it only exists so SDL/ImGui have something to report sizes for.
++    Uint32 flags = SDL_WINDOW_SHOWN;
+ #else
+     Uint32 flags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
+ #endif
+ 
++#ifndef __PS4__
+     if (use_opengl) {
+         flags = flags | SDL_WINDOW_OPENGL;
+     } else {
+         flags = flags | SDL_WINDOW_METAL;
+     }
++#endif
+ 
+     mWnd = SDL_CreateWindow(title, posX, posY, mWindowWidth, mWindowHeight, flags);
++#ifdef __PS4__
++    if (mWnd == nullptr) {
++        SPDLOG_ERROR("SDL_CreateWindow failed: {}", SDL_GetError());
++    }
++    mRenderer = nullptr;
++#endif
+ #ifdef _WIN32
+     // Get Windows window handle and use it to subclass the window procedure.
+     // Needed to circumvent SDLs DPI scaling problems under windows (original does only scale *sometimes*).
+@@ -404,7 +437,21 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+         posY = 100;
+     }
+ 
++#ifdef __PS4__
++    if (!Ship::Ps4::InitGraphics(mWindowWidth, mWindowHeight)) {
++        SPDLOG_CRITICAL("[PS4] could not create the GLES context, giving up");
++        spdlog::default_logger()->flush();
++        abort();
++    }
++    Ship::Ps4::SetSwapInterval(mVsyncEnabled ? 1 : 0);
++    mCtx = static_cast<SDL_GLContext>(Ship::Ps4::GetGlContext());
++    mFullScreen = true;
++    window_impl.Opengl = { mWnd, mCtx };
++    window_impl.Backend = WindowBackend::FAST3D_SDL_OPENGL;
++    if (false) {
++#else
+     if (use_opengl) {
++#endif
+         SDL_GL_GetDrawableSize(mWnd, &mWindowWidth, &mWindowHeight);
+ 
+         if (startFullScreen) {
+@@ -418,7 +465,11 @@ void GfxWindowBackendSDL2::Init(const char* gameName, const char* gfxApiName, bo
+ 
+         window_impl.Opengl = { mWnd, mCtx };
+         window_impl.Backend = WindowBackend::FAST3D_SDL_OPENGL;
++#ifdef __PS4__
++    } else if (false) {
++#else
+     } else {
++#endif
+         uint32_t flags = SDL_RENDERER_ACCELERATED;
+         if (mVsyncEnabled) {
+             flags |= SDL_RENDERER_PRESENTVSYNC;
+@@ -742,12 +793,68 @@ void GfxWindowBackendSDL2::SwapBuffersBegin() {
+ 
+     if (mVsyncEnabled != nextVsyncEnabled) {
+         mVsyncEnabled = nextVsyncEnabled;
++#ifdef __PS4__
++        Ship::Ps4::SetSwapInterval(mVsyncEnabled ? 1 : 0);
++#else
+         SDL_GL_SetSwapInterval(mVsyncEnabled ? 1 : 0);
+         SDL_RenderSetVSync(mRenderer, mVsyncEnabled ? 1 : 0);
++#endif
+     }
+ 
++#ifdef __PS4__
++    const Uint64 ps4PaceStart = SDL_GetPerformanceCounter();
++#endif
+     SyncFramerateWithTime();
++#ifdef __PS4__
++    // Time split per presented frame: sleeping to keep the pace, waiting in eglSwapBuffers (GPU), and
++    // the rest (building and submitting the frame on the CPU).
++    static double sPaceMs = 0.0;
++    static double sSwapMs = 0.0;
++    static double sSwapMaxMs = 0.0;
++    const Uint64 ps4SwapStart = SDL_GetPerformanceCounter();
++    sPaceMs += (double)(ps4SwapStart - ps4PaceStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
++    {
++        // Heartbeat: shows in the log whether frames keep being presented, and how fast.
++        static uint32_t sFrames = 0;
++        static Uint64 sLast = 0;
++        sFrames++;
++        if (sFrames <= 5 || sFrames % 1800 == 0) {
++            const Uint64 now = SDL_GetPerformanceCounter();
++            const double seconds = sLast != 0 ? (double)(now - sLast) / (double)SDL_GetPerformanceFrequency() : 0.0;
++            if (sFrames % 1800 == 0) {
++                const double frameMs = seconds * 1000.0 / 1800.0;
++                SPDLOG_INFO("[PS4] presenting frame {} ({:.2f} s since the last heartbeat; per frame {:.1f} ms: "
++                            "pacing sleep {:.1f}, GPU/swap {:.1f} (max {:.1f}), CPU build {:.1f})",
++                            sFrames, seconds, frameMs, sPaceMs / 1800.0, sSwapMs / 1800.0, sSwapMaxMs,
++                            frameMs - sPaceMs / 1800.0 - sSwapMs / 1800.0);
++            } else {
++                SPDLOG_INFO("[PS4] presenting frame {} ({:.2f} s since the last heartbeat)", sFrames, seconds);
++            }
++            sPaceMs = 0.0;
++            sSwapMs = 0.0;
++            sSwapMaxMs = 0.0;
++            sLast = now;
++        }
++        if (sFrames == 5 || sFrames % 3600 == 0) {
++            Ship::Ps4::LogMemoryStats("while running");
++        }
++    }
++    Ship::Ps4::SwapBuffers();
++    {
++        const double swapMs =
++            (double)(SDL_GetPerformanceCounter() - ps4SwapStart) * 1000.0 / (double)SDL_GetPerformanceFrequency();
++        sSwapMs += swapMs;
++        sSwapMaxMs = swapMs > sSwapMaxMs ? swapMs : sSwapMaxMs;
++    }
++    {
++        static uint32_t sPresented = 0;
++        if (++sPresented <= 5) {
++            SPDLOG_INFO("[PS4] frame {} presented", sPresented);
++        }
++    }
++#else
+     SDL_GL_SwapWindow(mWnd);
++#endif
+ }
+ 
+ void GfxWindowBackendSDL2::SwapBuffersEnd() {
+@@ -783,10 +890,16 @@ bool GfxWindowBackendSDL2::IsRunning() {
+ 
+ void GfxWindowBackendSDL2::Destroy() {
+     // TODO: destroy _any_ resources used by SDL
++#ifdef __PS4__
++    Ship::Ps4::ShutdownGraphics();
++    SDL_DestroyWindow(mWnd);
++    SDL_Quit();
++#else
+     SDL_GL_DeleteContext(mCtx);
+     SDL_DestroyWindow(mWnd);
+     SDL_DestroyRenderer(mRenderer);
+     SDL_Quit();
++#endif
+ }
+ 
+ bool GfxWindowBackendSDL2::IsFullscreen() {
+diff --git a/src/fast/interpreter.cpp b/src/fast/interpreter.cpp
+index 01883c8b..ecf95b22 100644
+--- a/src/fast/interpreter.cpp
++++ b/src/fast/interpreter.cpp
+@@ -4641,11 +4641,15 @@ class UcodeHandler {
+   public:
+     inline constexpr UcodeHandler(
+         std::initializer_list<std::pair<int8_t, std::pair<const char*, GfxOpcodeHandlerFunc>>> initializer) {
+-        std::fill(std::begin(mHandlers), std::end(mHandlers),
+-                  std::pair<const char*, GfxOpcodeHandlerFunc>(nullptr, nullptr));
++        // Plain loops instead of std::fill/pair assignment: neither is constexpr in older libc++ releases.
++        for (auto& handler : mHandlers) {
++            handler.first = nullptr;
++            handler.second = nullptr;
++        }
+ 
+-        for (const auto& [opcode, handler] : initializer) {
+-            mHandlers[static_cast<uint8_t>(opcode)] = handler;
++        for (const auto& entry : initializer) {
++            mHandlers[static_cast<uint8_t>(entry.first)].first = entry.second.first;
++            mHandlers[static_cast<uint8_t>(entry.first)].second = entry.second.second;
+         }
+     }
+ 
+@@ -4658,7 +4662,7 @@ class UcodeHandler {
+     }
+ 
+   private:
+-    std::pair<const char*, GfxOpcodeHandlerFunc> mHandlers[std::numeric_limits<uint8_t>::max() + 1];
++    std::pair<const char*, GfxOpcodeHandlerFunc> mHandlers[std::numeric_limits<uint8_t>::max() + 1]{};
+ };
+ 
+ static constexpr UcodeHandler rdpHandlers = {
+@@ -5033,6 +5037,12 @@ bool Interpreter::IsFrameReady() {
+ }
+ 
+ bool Interpreter::ViewportMatchesRendererResolution() {
++#ifdef __PS4__
++    // Always render the game into its own framebuffer. Effects that capture the picture (pause
++    // screen, transitions) can then sample that texture; capturing from the window surface
++    // instead goes through glCopyTexImage2D, which takes seconds on Piglet.
++    return false;
++#endif
+ #ifdef __APPLE__
+     // Always treat the viewport as not matching the render resolution on mac
+     // to avoid issues with retina scaling.
+diff --git a/src/ship/CMakeLists.txt b/src/ship/CMakeLists.txt
+index e37a3a1d..6aa1b920 100644
+--- a/src/ship/CMakeLists.txt
++++ b/src/ship/CMakeLists.txt
+@@ -100,6 +100,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+     )
+ endif()
+ 
++if (CMAKE_SYSTEM_NAME STREQUAL "PS4")
++    set(Source_Files__Port
++        ${CMAKE_CURRENT_SOURCE_DIR}/port/ps4/Ps4Platform.cpp
++    )
++endif()
+ source_group("port" FILES ${Source_Files__Port})
+ target_sources(libultraship PRIVATE ${Source_Files__Port})
+ 
+diff --git a/src/ship/Context.cpp b/src/ship/Context.cpp
+index 361a1f75..c58554e9 100644
+--- a/src/ship/Context.cpp
++++ b/src/ship/Context.cpp
+@@ -1,3 +1,6 @@
++#ifdef __PS4__
++#include "ship/port/ps4/Ps4Platform.h"
++#endif
+ #include "ship/Context.h"
+ #include "ship/controller/controldevice/controller/mapping/keyboard/KeyboardScancodes.h"
+ #include <cstring>
+@@ -172,6 +175,12 @@ bool Context::InitLogging(spdlog::level::level_enum debugBuildLogLevel,
+         mLogger = std::make_shared<spdlog::logger>("multi_sink", sinks.begin(), sinks.end());
+         GetLogger()->set_level(debugBuildLogLevel);
+         GetLogger()->flush_on(spdlog::level::trace);
++#elif defined(__PS4__)
++        // Synchronous and flushed on every message: when something goes wrong on the console the
++        // log file is the only thing left to look at.
++        mLogger = std::make_shared<spdlog::logger>(GetName(), sinks.begin(), sinks.end());
++        GetLogger()->set_level(spdlog::level::info);
++        GetLogger()->flush_on(spdlog::level::info);
+ #else
+         mLogThreadPool = std::make_shared<spdlog::details::thread_pool>(8192, 1);
+         mLogger = std::make_shared<spdlog::async_logger>(GetName(), sinks.begin(), sinks.end(), mLogThreadPool,
+@@ -285,6 +294,10 @@ bool Context::InitControlDeck(std::shared_ptr<ControlDeck> controlDeck) {
+     if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) {
+         SPDLOG_WARN("Failed to initialize SDL game controllers ({})", SDL_GetError());
+     }
++#ifdef __PS4__
++    // No SDL joystick driver for the DualShock 4: feed it in as a virtual game controller.
++    Ship::Ps4::AttachPad();
++#endif
+ 
+     return true;
+ }
+@@ -474,6 +487,11 @@ std::string Context::GetShortName() const {
+ }
+ 
+ std::string Context::GetAppBundlePath() {
++#ifdef __PS4__
++    // Read-only root of the installed package.
++    return "/app0";
++#endif
++
+ #if defined(__ANDROID__)
+     const char* externaldir = SDL_AndroidGetExternalStoragePath();
+     if (externaldir != NULL) {
+@@ -537,6 +555,15 @@ std::string Context::GetAppBundlePath() {
+ }
+ 
+ std::string Context::GetAppDirectoryPath(const std::string& appName) {
++#ifdef __PS4__
++    // Writable and reachable over FTP/USB: /data/<short name>
++    std::string name = appName;
++    if (name.empty() && GetRawInstance() != nullptr) {
++        name = GetRawInstance()->mShortName;
++    }
++    return "/data/" + (name.empty() ? std::string("ship") : name);
++#endif
++
+ #if defined(__ANDROID__)
+     const char* externaldir = SDL_AndroidGetExternalStoragePath();
+     if (externaldir != NULL) {
+@@ -605,8 +632,14 @@ std::string Context::LocateFileAcrossAppDirs(const std::string& path, const std:
+     if (std::filesystem::exists(fpath)) {
+         return fpath;
+     }
++#ifdef __PS4__
++    // Relative paths are rejected by the system (EINVAL, which std::filesystem turns into an
++    // exception): point at where the file would be in the data directory instead.
++    return GetPathRelativeToAppDirectory(path, appName);
++#else
+     // current dir
+     return "./" + std::string(path);
++#endif
+ }
+ 
+ } // namespace Ship
+diff --git a/src/ship/audio/SDLAudioPlayer.cpp b/src/ship/audio/SDLAudioPlayer.cpp
+index d9f1e44d..747897ed 100644
+--- a/src/ship/audio/SDLAudioPlayer.cpp
++++ b/src/ship/audio/SDLAudioPlayer.cpp
+@@ -1,6 +1,198 @@
+ #include "ship/audio/SDLAudioPlayer.h"
+ #include <spdlog/spdlog.h>
+ 
++#ifdef __PS4__
++// PS4: SDL has no audio driver there, so this "SDL" player talks to sceAudioOut directly.
++// The main audio port only accepts 48 kHz, the game mixes at a lower rate: a small feeder thread
++// resamples (linear interpolation) and hands 256 frame blocks to the system.
++
++#include <orbis/AudioOut.h>
++#include "ship/port/ps4/Ps4Platform.h"
++
++#include <atomic>
++#include <cstring>
++#include <mutex>
++#include <thread>
++#include <vector>
++
++namespace Ship {
++namespace {
++constexpr uint32_t kOutputRate = 48000;
++constexpr uint32_t kGranularity = 256;
++constexpr int32_t kSystemUserId = 0xFF;
++
++std::mutex sQueueMutex;
++// Diagnostics, read and reset by Ps4Audio_TakeStats().
++std::atomic<uint32_t> sDroppedBuffers{ 0 };
++std::atomic<uint32_t> sStarvedBlocks{ 0 };
++std::vector<int16_t> sQueue; // interleaved stereo frames at the game's sample rate
++size_t sQueueRead = 0;       // index of the first unread sample in sQueue
++std::thread sFeeder;
++std::atomic<bool> sRunning{ false };
++int32_t sPort = -1;
++uint32_t sSourceRate = 32000;
++
++void FeederThread() {
++    int16_t block[kGranularity * 2];
++    double position = 0.0; // read position in source frames, relative to sQueueRead
++
++    while (sRunning) {
++        {
++            std::lock_guard<std::mutex> lock(sQueueMutex);
++            const double step = (double)sSourceRate / (double)kOutputRate;
++            const size_t available = (sQueue.size() - sQueueRead) / 2;
++            const int16_t* frames = sQueue.data() + sQueueRead;
++
++            bool starved = false;
++            for (uint32_t i = 0; i < kGranularity; i++) {
++                const size_t index = (size_t)position;
++                if (index + 1 < available) {
++                    const double fraction = position - (double)index;
++                    const int16_t* a = frames + index * 2;
++                    block[i * 2 + 0] = (int16_t)((double)a[0] + ((double)a[2] - (double)a[0]) * fraction);
++                    block[i * 2 + 1] = (int16_t)((double)a[1] + ((double)a[3] - (double)a[1]) * fraction);
++                    position += step;
++                } else if (index < available) {
++                    block[i * 2 + 0] = frames[index * 2 + 0];
++                    block[i * 2 + 1] = frames[index * 2 + 1];
++                    position += step;
++                } else {
++                    // Underrun: play silence until the game catches up.
++                    block[i * 2 + 0] = 0;
++                    block[i * 2 + 1] = 0;
++                    starved = true;
++                }
++            }
++            if (starved) {
++                sStarvedBlocks.fetch_add(1);
++            }
++
++            size_t consumed = (size_t)position;
++            if (consumed > available) {
++                consumed = available;
++            }
++            sQueueRead += consumed * 2;
++            position -= (double)consumed;
++            if (position >= 1.0) {
++                position = 0.0;
++            }
++
++            if (sQueueRead >= 8192 && sQueueRead * 2 >= sQueue.size()) {
++                sQueue.erase(sQueue.begin(), sQueue.begin() + (std::ptrdiff_t)sQueueRead);
++                sQueueRead = 0;
++            }
++        }
++
++        // Blocks until the previous block has been played.
++        sceAudioOutOutput(sPort, block);
++    }
++}
++} // namespace
++
++SDLAudioPlayer::~SDLAudioPlayer() {
++    SPDLOG_TRACE("destruct PS4 audio player");
++    DoClose();
++}
++
++void SDLAudioPlayer::DoClose() {
++    if (sRunning.exchange(false)) {
++        if (sFeeder.joinable()) {
++            sFeeder.join();
++        }
++    }
++    if (sPort >= 0) {
++        sceAudioOutClose(sPort);
++        sPort = -1;
++    }
++    {
++        std::lock_guard<std::mutex> lock(sQueueMutex);
++        sQueue.clear();
++        sQueueRead = 0;
++    }
++    mDevice = 0;
++}
++
++} // namespace Ship
++
++extern "C" void Ps4Audio_TakeStats(uint32_t* droppedBuffers, uint32_t* starvedBlocks) {
++    *droppedBuffers = Ship::sDroppedBuffers.exchange(0);
++    *starvedBlocks = Ship::sStarvedBlocks.exchange(0);
++}
++
++namespace Ship {
++bool SDLAudioPlayer::DoInit() {
++    mNumChannels = this->GetNumOutputChannels();
++    sSourceRate = (uint32_t)this->GetSampleRate();
++
++    Ship::Ps4::LoadSystemModules();
++    // Returns an "already initialized" error when called twice, which is fine.
++    sceAudioOutInit();
++
++    sPort = sceAudioOutOpen(kSystemUserId, ORBIS_AUDIO_OUT_PORT_TYPE_MAIN, 0, kGranularity, kOutputRate,
++                            ORBIS_AUDIO_OUT_PARAM_FORMAT_S16_STEREO);
++    if (sPort < 0) {
++        SPDLOG_ERROR("[PS4] sceAudioOutOpen failed: 0x{:08X}", (uint32_t)sPort);
++        sPort = -1;
++        return false;
++    }
++
++    {
++        std::lock_guard<std::mutex> lock(sQueueMutex);
++        sQueue.clear();
++        sQueue.reserve(1 << 16);
++        sQueueRead = 0;
++    }
++
++    sRunning = true;
++    sFeeder = std::thread(FeederThread);
++    mDevice = 1;
++
++    SPDLOG_INFO("[PS4] audio initialized: {} channels, {} Hz resampled to {} Hz", mNumChannels, sSourceRate,
++                kOutputRate);
++    return true;
++}
++
++int SDLAudioPlayer::Buffered() {
++    std::lock_guard<std::mutex> lock(sQueueMutex);
++    // The system output has no buffer of its own beyond one 256 frame block, so a game tick that
++    // runs a little late (20 Hz games refill once every 50 ms) used to drain the queue and cut
++    // the sound. Under-report by a fixed cushion: the game's buffering logic then keeps that many
++    // extra frames queued.
++    constexpr int kCushionFrames = 3200; // 100 ms at 32 kHz
++    const int queued = (int)((sQueue.size() - sQueueRead) / 2);
++    return queued > kCushionFrames ? queued - kCushionFrames : 0;
++}
++
++void SDLAudioPlayer::DoPlay(const uint8_t* buf, size_t len) {
++    if (sPort < 0 || mNumChannels < 2) {
++        return;
++    }
++
++    const int16_t* samples = reinterpret_cast<const int16_t*>(buf);
++    const size_t frames = len / (sizeof(int16_t) * (size_t)mNumChannels);
++
++    std::lock_guard<std::mutex> lock(sQueueMutex);
++    // Room for the 100 ms cushion plus a few game frames of audio (BenPort adds an update when low).
++    if ((sQueue.size() - sQueueRead) / 2 >= 12000) {
++        // Don't fill the audio buffer too much in case this happens
++        sDroppedBuffers.fetch_add(1);
++        return;
++    }
++
++    if (mNumChannels == 2) {
++        sQueue.insert(sQueue.end(), samples, samples + frames * 2);
++    } else {
++        // Surround was requested but the port is stereo: keep the front pair.
++        for (size_t i = 0; i < frames; i++) {
++            sQueue.push_back(samples[i * (size_t)mNumChannels + 0]);
++            sQueue.push_back(samples[i * (size_t)mNumChannels + 1]);
++        }
++    }
++}
++} // namespace Ship
++
++#else
++
+ namespace Ship {
+ 
+ SDLAudioPlayer::~SDLAudioPlayer() {
+@@ -60,3 +252,4 @@ void SDLAudioPlayer::DoPlay(const uint8_t* buf, size_t len) {
+     }
+ }
+ } // namespace Ship
++#endif // __PS4__
+diff --git a/src/ship/port/ps4/Ps4Platform.cpp b/src/ship/port/ps4/Ps4Platform.cpp
+new file mode 100644
+index 00000000..e0fc593b
+--- /dev/null
++++ b/src/ship/port/ps4/Ps4Platform.cpp
+@@ -0,0 +1,651 @@
++#ifdef __PS4__
++
++#include "ship/port/ps4/Ps4Platform.h"
++#include "ship/Context.h"
++
++#include <stdio.h>
++#include <string.h>
++#include <unistd.h>
++#include <atomic>
++#include <string>
++#include <thread>
++
++#include <SDL2/SDL.h>
++#include <spdlog/spdlog.h>
++
++#include <orbis/libkernel.h>
++#include <orbis/Pad.h>
++#include <orbis/Pigletv2VSH.h>
++#include <orbis/SystemService.h>
++#include <orbis/UserService.h>
++
++namespace Ship {
++namespace Ps4 {
++
++// ---------------------------------------------------------------------------------------------
++// Modules
++// ---------------------------------------------------------------------------------------------
++
++// Retail firmware ships Piglet without its runtime shader compiler. Like other GLES homebrew
++// (e.g. the Super Mario 64 port) we load a Piglet + shader compiler pair from this directory.
++static constexpr const char* kUserModuleDir = "/data/self/system/common/lib";
++// A package may also carry the pair itself, which makes it self-contained.
++static constexpr const char* kBundledModuleDir = "/app0/assets/misc";
++
++static int32_t sPigletModule = -1;
++static int32_t sShaderCompilerModule = -1;
++
++static int32_t LoadModule(const std::string& path) {
++    int32_t startResult = 0;
++    SPDLOG_INFO("[PS4] loading module \"{}\"", path);
++    int32_t handle = (int32_t)sceKernelLoadStartModule(path.c_str(), 0, nullptr, 0, nullptr, &startResult);
++    if (handle < 0) {
++        SPDLOG_WARN("[PS4] sceKernelLoadStartModule(\"{}\") failed: 0x{:08X}", path, (uint32_t)handle);
++    } else {
++        SPDLOG_INFO("[PS4] loaded module \"{}\" (handle {}, module_start {})", path, handle, startResult);
++    }
++    return handle;
++}
++
++static std::string SystemModuleDir() {
++    const char* sandboxWord = sceKernelGetFsSandboxRandomWord();
++    return std::string("/") + (sandboxWord != nullptr ? sandboxWord : "system") + "/common/lib";
++}
++
++static bool sSystemModulesLoaded = false;
++
++bool LoadSystemModules() {
++    if (sSystemModulesLoaded) {
++        return true;
++    }
++    sSystemModulesLoaded = true;
++
++    const std::string systemDir = SystemModuleDir();
++    static const char* const kSystemModules[] = {
++        "libSceSysCore", "libSceMbus", "libSceIpmi", "libSceSystemService",
++        "libSceUserService", "libSceAudioOut", "libScePad",
++    };
++    for (const char* name : kSystemModules) {
++        LoadModule(systemDir + "/" + name + ".sprx");
++    }
++    return true;
++}
++
++static bool LoadGraphicsModules() {
++    if (sPigletModule >= 0) {
++        return true;
++    }
++
++    LoadSystemModules();
++    const std::string systemDir = SystemModuleDir();
++
++    // Both modules have to come from the same place, they are a matched pair.
++    const char* moduleDir = kUserModuleDir;
++    if (access((std::string(kBundledModuleDir) + "/libScePigletv2VSH.sprx").c_str(), F_OK) == 0) {
++        sPigletModule = LoadModule(std::string(kBundledModuleDir) + "/libScePigletv2VSH.sprx");
++        if (sPigletModule >= 0) {
++            moduleDir = kBundledModuleDir;
++        }
++    }
++    if (sPigletModule < 0) {
++        sPigletModule = LoadModule(std::string(kUserModuleDir) + "/libScePigletv2VSH.sprx");
++    }
++    if (sPigletModule < 0) {
++        SPDLOG_WARN("[PS4] no Piglet in {}, falling back to the system one (shader compilation will most likely "
++                    "not work)",
++                    kUserModuleDir);
++        sPigletModule = LoadModule(systemDir + "/libScePigletv2VSH.sprx");
++    }
++    if (sPigletModule < 0) {
++        SPDLOG_CRITICAL("[PS4] could not load libScePigletv2VSH.sprx");
++        return false;
++    }
++
++    sShaderCompilerModule = LoadModule(std::string(moduleDir) + "/libSceShaccVSH.sprx");
++    if (sShaderCompilerModule < 0) {
++        sShaderCompilerModule = LoadModule(systemDir + "/libSceShaccVSH.sprx");
++    }
++    if (sShaderCompilerModule < 0) {
++        SPDLOG_ERROR("[PS4] could not load libSceShaccVSH.sprx (the GLSL compiler). Copy libScePigletv2VSH.sprx and "
++                     "libSceShaccVSH.sprx to {}/",
++                     kUserModuleDir);
++    }
++
++    return true;
++}
++
++// ---------------------------------------------------------------------------------------------
++// EGL / Piglet
++// ---------------------------------------------------------------------------------------------
++
++// Marker files in the game's data directory (/data/soh, /data/2ship...).
++static std::string VsyncMarker() {
++    return Ship::Context::GetPathRelativeToAppDirectory("ps4_vsync");
++}
++static std::string NoVsyncMarker() {
++    return Ship::Context::GetPathRelativeToAppDirectory("ps4_novsync");
++}
++static bool sVsync = false;
++// SDL_GetTicks64() + 1 while eglSwapBuffers() is running, 0 otherwise.
++static std::atomic<uint64_t> sSwapStartedAt{ 0 };
++static std::atomic<uint64_t> sSwapsDone{ 0 };
++
++static void SwapWatchdog() {
++    for (;;) {
++        SDL_Delay(250);
++        const uint64_t startedAt = sSwapStartedAt.load();
++        if (startedAt != 0 && SDL_GetTicks64() + 1 - startedAt > 4000) {
++            FILE* marker = fopen(NoVsyncMarker().c_str(), "w");
++            if (marker != nullptr) {
++                fputs("eglSwapBuffers blocked with swap interval 1; delete this file to try vsync again\n", marker);
++                fclose(marker);
++            }
++            SPDLOG_ERROR("[PS4] eglSwapBuffers has been blocked for 4 s after {} swaps: vsync disabled for the next "
++                         "start, quitting",
++                         sSwapsDone.load());
++            spdlog::default_logger()->flush();
++            sceSystemServiceLoadExec("exit", nullptr);
++            _exit(0);
++        }
++    }
++}
++
++static EGLDisplay sDisplay = EGL_NO_DISPLAY;
++static EGLSurface sSurface = EGL_NO_SURFACE;
++static EGLContext sContext = EGL_NO_CONTEXT;
++
++extern "C" int Ps4Heap_GetKind(void) __attribute__((weak));
++extern "C" void Ps4Heap_GetStats(size_t* arenaSize, size_t* inUse, size_t* peak) __attribute__((weak));
++
++static size_t LargestFreeDirectBlock() {
++    typedef int32_t (*AvailableDirectFn)(off_t, off_t, size_t, off_t*, size_t*);
++    off_t physicalAddress = 0;
++    size_t directSize = 0;
++    ((AvailableDirectFn)(void*)sceKernelAvailableDirectMemorySize)(0, (off_t)sceKernelGetDirectMemorySize(), 0,
++                                                                   &physicalAddress, &directSize);
++    return directSize;
++}
++
++void LogMemoryStats(const char* when) {
++    typedef int32_t (*AvailableFlexibleFn)(size_t*);
++    size_t flexibleSize = 0;
++    ((AvailableFlexibleFn)(void*)sceKernelAvailableFlexibleMemorySize)(&flexibleSize);
++
++    size_t arena = 0;
++    size_t inUse = 0;
++    size_t peak = 0;
++    int kind = 0;
++    if (Ps4Heap_GetStats != nullptr && Ps4Heap_GetKind != nullptr) {
++        Ps4Heap_GetStats(&arena, &inUse, &peak);
++        kind = Ps4Heap_GetKind();
++    }
++    SPDLOG_INFO("[PS4] memory {}: heap {} MiB used / {} MiB peak of {} MiB ({}), free direct block {} MiB, free "
++                "flexible {} MiB",
++                when, inUse >> 20, peak >> 20, arena >> 20,
++                kind == 1 ? "system flexible" : kind == 2 ? "direct" : "no arena", LargestFreeDirectBlock() >> 20,
++                flexibleSize >> 20);
++}
++
++static void LogMemory(const char* when) {
++    // The prototypes in the OpenOrbis header don't match the real functions (out parameters are
++    // declared by value), hence the casts.
++    typedef int32_t (*AvailableDirectFn)(off_t, off_t, size_t, off_t*, size_t*);
++    typedef int32_t (*AvailableFlexibleFn)(size_t*);
++
++    off_t physicalAddress = 0;
++    size_t directSize = 0;
++    size_t flexibleSize = 0;
++    const size_t totalDirect = sceKernelGetDirectMemorySize();
++    ((AvailableDirectFn)(void*)sceKernelAvailableDirectMemorySize)(0, (off_t)totalDirect, 0, &physicalAddress,
++                                                                   &directSize);
++    ((AvailableFlexibleFn)(void*)sceKernelAvailableFlexibleMemorySize)(&flexibleSize);
++    SPDLOG_INFO("[PS4] memory {}: direct total {} MiB, largest free direct block {} MiB, free flexible {} MiB", when,
++                totalDirect >> 20, directSize >> 20, flexibleSize >> 20);
++}
++
++struct PigletSizes {
++    uint64_t systemShared;
++    uint64_t videoShared;
++    uint64_t flexible; // 0: don't let Piglet use flexible memory at all
++    uint32_t drawCommandBuffer;
++    uint32_t lcueResourceBuffer;
++    uint64_t neededDirect; // only tried when this much direct memory is free in one block
++};
++
++// Tried in this order until eglGetDisplay() succeeds.
++//
++// The application has 768 MiB of direct memory and ~255 MiB of flexible memory. Piglet takes its
++// "shared" memory from the former and, when allowed to, textures/render targets from the latter.
++// The first entries need the game heap to live outside of direct memory (see Ps4Heap.c); the
++// last ones are the split that was verified on a console with the heap inside of it.
++static const PigletSizes kPigletCandidates[] = {
++    { 128ull << 20, 512ull << 20, 236ull << 20, 4u << 20, 4u << 20, 700ull << 20 },
++    { 128ull << 20, 512ull << 20, 208ull << 20, 4u << 20, 4u << 20, 700ull << 20 },
++    { 128ull << 20, 512ull << 20, 208ull << 20, 1u << 20, 1u << 20, 700ull << 20 },
++    { 64ull << 20, 128ull << 20, 208ull << 20, 1u << 20, 1u << 20, 0 },
++    { 64ull << 20, 128ull << 20, 176ull << 20, 1u << 20, 1u << 20, 0 },
++    { 64ull << 20, 128ull << 20, 64ull << 20, 1u << 20, 1u << 20, 0 },
++};
++
++static bool ConfigurePiglet(int width, int height, const PigletSizes& sizes) {
++    OrbisPglConfig config;
++    memset(&config, 0, sizeof(config));
++    config.size = sizeof(config);
++    config.flags = ORBIS_PGL_FLAGS_USE_COMPOSITE_EXT | 0x60;
++    if (sizes.flexible != 0) {
++        config.flags |= ORBIS_PGL_FLAGS_USE_FLEXIBLE_MEMORY;
++    }
++    config.processOrder = 1;
++    config.systemSharedMemorySize = sizes.systemShared;
++    config.videoSharedMemorySize = sizes.videoShared;
++    config.maxMappedFlexibleMemory = sizes.flexible;
++    config.drawCommandBufferSize = sizes.drawCommandBuffer;
++    config.lcueResourceBufferSize = sizes.lcueResourceBuffer;
++    config.dbgPosCmd_0x40 = width;
++    config.dbgPosCmd_0x44 = height;
++    config.dbgPosCmd_0x48 = 0;
++    config.dbgPosCmd_0x4C = 0;
++    config.unk_0x5C = 2;
++
++    SPDLOG_INFO("[PS4] scePigletSetConfigurationVSH: video {} MiB, system {} MiB, flexible {} MiB, command buffer {} "
++                "MiB",
++                sizes.videoShared >> 20, sizes.systemShared >> 20, sizes.flexible >> 20,
++                sizes.drawCommandBuffer >> 20);
++    if (!scePigletSetConfigurationVSH(&config)) {
++        SPDLOG_WARN("[PS4] scePigletSetConfigurationVSH rejected that configuration");
++        return false;
++    }
++    return true;
++}
++
++static bool ChooseConfig(EGLConfig* config) {
++    // Preferred: 24 bit depth + stencil. The last entry is what the known-good homebrew uses.
++    static const EGLint kDepthStencil[][2] = { { 24, 8 }, { 24, 0 }, { 16, 0 }, { 0, 0 } };
++
++    for (const auto& ds : kDepthStencil) {
++        const EGLint attribs[] = {
++            EGL_RED_SIZE,        8,
++            EGL_GREEN_SIZE,      8,
++            EGL_BLUE_SIZE,       8,
++            EGL_ALPHA_SIZE,      8,
++            EGL_DEPTH_SIZE,      ds[0],
++            EGL_STENCIL_SIZE,    ds[1],
++            EGL_SAMPLE_BUFFERS,  0,
++            EGL_SAMPLES,         0,
++            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
++            EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
++            EGL_NONE,
++        };
++        EGLint numConfigs = 0;
++        if (eglChooseConfig(sDisplay, attribs, config, 1, &numConfigs) && numConfigs >= 1) {
++            EGLint depth = 0;
++            EGLint stencil = 0;
++            eglGetConfigAttrib(sDisplay, *config, EGL_DEPTH_SIZE, &depth);
++            eglGetConfigAttrib(sDisplay, *config, EGL_STENCIL_SIZE, &stencil);
++            SPDLOG_INFO("[PS4] EGL config: requested depth {} / stencil {}, got depth {} / stencil {}", ds[0], ds[1],
++                        depth, stencil);
++            return true;
++        }
++        SPDLOG_WARN("[PS4] eglChooseConfig(depth {}, stencil {}) failed: 0x{:04X}", ds[0], ds[1],
++                    (unsigned int)eglGetError());
++    }
++    return false;
++}
++
++bool InitGraphics(int width, int height) {
++    if (sContext != EGL_NO_CONTEXT) {
++        return true;
++    }
++
++    SPDLOG_INFO("[PS4] InitGraphics: loading modules");
++    if (!LoadGraphicsModules()) {
++        return false;
++    }
++
++    LogMemory("before Piglet");
++    LogMemoryStats("before Piglet");
++    for (const PigletSizes& sizes : kPigletCandidates) {
++        if (LargestFreeDirectBlock() < sizes.neededDirect) {
++            continue;
++        }
++        if (!ConfigurePiglet(width, height, sizes)) {
++            continue;
++        }
++        SPDLOG_INFO("[PS4] eglGetDisplay");
++        sDisplay = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++        if (sDisplay != EGL_NO_DISPLAY) {
++            break;
++        }
++        SPDLOG_WARN("[PS4] eglGetDisplay failed with that configuration");
++        LogMemory("after the failed attempt");
++    }
++    if (sDisplay == EGL_NO_DISPLAY) {
++        SPDLOG_CRITICAL("[PS4] eglGetDisplay failed with every Piglet configuration");
++        return false;
++    }
++    LogMemory("after eglGetDisplay");
++
++    EGLint major = 0;
++    EGLint minor = 0;
++    SPDLOG_INFO("[PS4] eglInitialize");
++    if (!eglInitialize(sDisplay, &major, &minor)) {
++        SPDLOG_CRITICAL("[PS4] eglInitialize failed: 0x{:04X}", (unsigned int)eglGetError());
++        return false;
++    }
++    SPDLOG_INFO("[PS4] EGL {}.{}", major, minor);
++
++    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
++        SPDLOG_CRITICAL("[PS4] eglBindAPI failed: 0x{:04X}", (unsigned int)eglGetError());
++        return false;
++    }
++
++    // Vertical sync is opt-in (create an empty ps4_vsync file in the data directory): on a real console the
++    // game felt clearly worse with a swap interval of 1 than paced by its own timer, any frame
++    // that is slightly late waits for a whole extra refresh. The watchdog stays as a safety net,
++    // eglSwapBuffers() is known to block forever with some ways of enabling it.
++    sVsync = access(VsyncMarker().c_str(), F_OK) == 0 && access(NoVsyncMarker().c_str(), F_OK) != 0;
++    SPDLOG_INFO("[PS4] vsync: {}", sVsync ? "swap interval 1 (ps4_vsync marker found)" : "off, swap interval 0");
++    if (!eglSwapInterval(sDisplay, sVsync ? 1 : 0)) {
++        SPDLOG_WARN("[PS4] eglSwapInterval failed: 0x{:04X}", (unsigned int)eglGetError());
++    }
++    if (sVsync) {
++        std::thread(SwapWatchdog).detach();
++    }
++
++    EGLConfig config = nullptr;
++    if (!ChooseConfig(&config)) {
++        SPDLOG_CRITICAL("[PS4] no usable EGL configuration");
++        return false;
++    }
++
++    OrbisPglWindow window;
++    memset(&window, 0, sizeof(window));
++    window.uID = 0;
++    window.uWidth = (uint32_t)width;
++    window.uHeight = (uint32_t)height;
++
++    const EGLint windowAttribs[] = { EGL_RENDER_BUFFER, EGL_BACK_BUFFER, EGL_NONE };
++    SPDLOG_INFO("[PS4] eglCreateWindowSurface");
++    sSurface = eglCreateWindowSurface(sDisplay, config, &window, windowAttribs);
++    if (sSurface == EGL_NO_SURFACE) {
++        SPDLOG_CRITICAL("[PS4] eglCreateWindowSurface failed: 0x{:04X}", (unsigned int)eglGetError());
++        return false;
++    }
++
++    const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
++    SPDLOG_INFO("[PS4] eglCreateContext");
++    sContext = eglCreateContext(sDisplay, config, EGL_NO_CONTEXT, contextAttribs);
++    if (sContext == EGL_NO_CONTEXT) {
++        SPDLOG_CRITICAL("[PS4] eglCreateContext failed: 0x{:04X}", (unsigned int)eglGetError());
++        return false;
++    }
++
++    SPDLOG_INFO("[PS4] eglMakeCurrent");
++    if (!eglMakeCurrent(sDisplay, sSurface, sSurface, sContext)) {
++        SPDLOG_CRITICAL("[PS4] eglMakeCurrent failed: 0x{:04X}", (unsigned int)eglGetError());
++        return false;
++    }
++
++    SPDLOG_INFO("[PS4] GLES context ready ({}x{})", width, height);
++
++    return true;
++}
++
++void SetSwapInterval(int interval) {
++    // Deliberately ignored. With a swap interval of 1 eglSwapBuffers() never returned on a real
++    // console; Piglet is left at interval 0 (set once in InitGraphics, like every other Piglet
++    // homebrew does) and the frame pacing is done by the window backend's own timer.
++    (void)interval;
++}
++
++void SwapBuffers() {
++    if (sDisplay != EGL_NO_DISPLAY && sSurface != EGL_NO_SURFACE) {
++        sSwapStartedAt.store(SDL_GetTicks64() + 1);
++        eglSwapBuffers(sDisplay, sSurface);
++        sSwapStartedAt.store(0);
++        sSwapsDone.fetch_add(1);
++    }
++}
++
++uint64_t GetSwapCount() {
++    return sSwapsDone.load();
++}
++
++bool IsSwapInProgress() {
++    return sSwapStartedAt.load() != 0;
++}
++
++bool IsVsyncActive() {
++    return sVsync;
++}
++
++void ShutdownGraphics() {
++    if (sDisplay == EGL_NO_DISPLAY) {
++        return;
++    }
++    eglMakeCurrent(sDisplay, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
++    if (sSurface != EGL_NO_SURFACE) {
++        eglDestroySurface(sDisplay, sSurface);
++        sSurface = EGL_NO_SURFACE;
++    }
++    if (sContext != EGL_NO_CONTEXT) {
++        eglDestroyContext(sDisplay, sContext);
++        sContext = EGL_NO_CONTEXT;
++    }
++    eglTerminate(sDisplay);
++    sDisplay = EGL_NO_DISPLAY;
++}
++
++void HideSplashScreen() {
++    // The system keeps showing the boot splash until the application says it's alive.
++    sceSystemServiceHideSplashScreen();
++}
++
++void* GetGlContext() {
++    return (void*)sContext;
++}
++
++// ---------------------------------------------------------------------------------------------
++// User / pad
++// ---------------------------------------------------------------------------------------------
++
++static bool sUserServiceReady = false;
++static int32_t sUserId = -1;
++
++int32_t GetInitialUserId() {
++    if (!sUserServiceReady) {
++        LoadSystemModules();
++        // 700 == SCE_KERNEL_PRIO_FIFO_DEFAULT. Fails harmlessly if the service is already up.
++        struct {
++            int32_t priority;
++        } params = { 700 };
++        sceUserServiceInitialize(&params);
++        if (sceUserServiceGetInitialUser(&sUserId) < 0) {
++            SPDLOG_ERROR("[PS4] sceUserServiceGetInitialUser failed");
++            sUserId = -1;
++        }
++        sUserServiceReady = true;
++    }
++    return sUserId;
++}
++
++static int32_t sPadHandle = -1;
++static SDL_JoystickID sPadInstanceId = -1;
++
++static Sint16 StickToAxis(uint8_t value) {
++    // 0..255 with 128 as rest position -> -32768..32767
++    int scaled = ((int)value - 128) * 258;
++    if (scaled > 32767) {
++        scaled = 32767;
++    }
++    if (scaled < -32768) {
++        scaled = -32768;
++    }
++    return (Sint16)scaled;
++}
++
++static Sint16 TriggerToAxis(uint8_t value) {
++    // 0..255 -> -32768..32767 (SDL treats virtual trigger axes as full range)
++    return (Sint16)((int)value * 257 - 32768);
++}
++
++static void SDLCALL PadUpdate(void* userdata) {
++    if (sPadHandle < 0) {
++        return;
++    }
++
++    SDL_Joystick* joystick = SDL_JoystickFromInstanceID(sPadInstanceId);
++    if (joystick == nullptr) {
++        return;
++    }
++
++    OrbisPadData data;
++    memset(&data, 0, sizeof(data));
++    if (scePadReadState(sPadHandle, &data) < 0 || !data.connected) {
++        return;
++    }
++
++    const uint32_t buttons = data.buttons;
++    const struct {
++        SDL_GameControllerButton sdl;
++        uint32_t orbis;
++    } kButtons[] = {
++        { SDL_CONTROLLER_BUTTON_A, ORBIS_PAD_BUTTON_CROSS },
++        { SDL_CONTROLLER_BUTTON_B, ORBIS_PAD_BUTTON_CIRCLE },
++        { SDL_CONTROLLER_BUTTON_X, ORBIS_PAD_BUTTON_SQUARE },
++        { SDL_CONTROLLER_BUTTON_Y, ORBIS_PAD_BUTTON_TRIANGLE },
++        // The SHARE button belongs to the system; the touch pad click stands in for "select".
++        { SDL_CONTROLLER_BUTTON_BACK, ORBIS_PAD_BUTTON_TOUCH_PAD },
++        { SDL_CONTROLLER_BUTTON_START, ORBIS_PAD_BUTTON_OPTIONS },
++        { SDL_CONTROLLER_BUTTON_LEFTSTICK, ORBIS_PAD_BUTTON_L3 },
++        { SDL_CONTROLLER_BUTTON_RIGHTSTICK, ORBIS_PAD_BUTTON_R3 },
++        { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, ORBIS_PAD_BUTTON_L1 },
++        { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, ORBIS_PAD_BUTTON_R1 },
++        { SDL_CONTROLLER_BUTTON_DPAD_UP, ORBIS_PAD_BUTTON_UP },
++        { SDL_CONTROLLER_BUTTON_DPAD_DOWN, ORBIS_PAD_BUTTON_DOWN },
++        { SDL_CONTROLLER_BUTTON_DPAD_LEFT, ORBIS_PAD_BUTTON_LEFT },
++        { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, ORBIS_PAD_BUTTON_RIGHT },
++    };
++    for (const auto& button : kButtons) {
++        SDL_JoystickSetVirtualButton(joystick, button.sdl, (buttons & button.orbis) ? SDL_PRESSED : SDL_RELEASED);
++    }
++
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_LEFTX, StickToAxis(data.leftStick.x));
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_LEFTY, StickToAxis(data.leftStick.y));
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_RIGHTX, StickToAxis(data.rightStick.x));
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_RIGHTY, StickToAxis(data.rightStick.y));
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_TRIGGERLEFT, TriggerToAxis(data.analogButtons.l2));
++    SDL_JoystickSetVirtualAxis(joystick, SDL_CONTROLLER_AXIS_TRIGGERRIGHT, TriggerToAxis(data.analogButtons.r2));
++}
++
++static int SDLCALL PadRumble(void* userdata, Uint16 lowFrequencyRumble, Uint16 highFrequencyRumble) {
++    if (sPadHandle < 0) {
++        return -1;
++    }
++    OrbisPadVibeParam vibration;
++    vibration.lgMotor = (uint8_t)(lowFrequencyRumble >> 8);
++    vibration.smMotor = (uint8_t)(highFrequencyRumble >> 8);
++    return scePadSetVibration(sPadHandle, &vibration) < 0 ? -1 : 0;
++}
++
++static int SDLCALL PadSetLED(void* userdata, Uint8 red, Uint8 green, Uint8 blue) {
++    if (sPadHandle < 0) {
++        return -1;
++    }
++    OrbisPadColor color;
++    color.r = red;
++    color.g = green;
++    color.b = blue;
++    color.a = 255;
++    return scePadSetLightBar(sPadHandle, &color) < 0 ? -1 : 0;
++}
++
++void AttachPad() {
++    if (sPadInstanceId >= 0) {
++        return;
++    }
++
++    // The dummy video driver never gives the window input focus, and SDL drops joystick input of
++    // unfocused applications unless told otherwise. Override so the config can't turn this off.
++    SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1", SDL_HINT_OVERRIDE);
++
++    LoadSystemModules();
++    const int32_t userId = GetInitialUserId();
++
++    int32_t result = scePadInit();
++    if (result < 0) {
++        SPDLOG_WARN("[PS4] scePadInit returned 0x{:08X}", (uint32_t)result);
++    }
++
++    sPadHandle = scePadOpen(userId, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
++    if (sPadHandle < 0) {
++        // Already opened by somebody else in this process.
++        sPadHandle = scePadGetHandle(userId, ORBIS_PAD_PORT_TYPE_STANDARD, 0);
++    }
++    if (sPadHandle < 0) {
++        SPDLOG_ERROR("[PS4] scePadOpen failed: 0x{:08X}", (uint32_t)sPadHandle);
++        return;
++    }
++
++    SDL_VirtualJoystickDesc desc;
++    SDL_zero(desc);
++    desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
++    desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
++    desc.naxes = SDL_CONTROLLER_AXIS_MAX;
++    desc.nbuttons = SDL_CONTROLLER_BUTTON_MAX;
++    desc.nhats = 0;
++    // Sony DualShock 4: lets SDL (and the UI built on it) pick PlayStation button names.
++    desc.vendor_id = 0x054C;
++    desc.product_id = 0x09CC;
++    desc.name = "PS4 Controller";
++    desc.Update = PadUpdate;
++    desc.Rumble = PadRumble;
++    desc.SetLED = PadSetLED;
++
++    const int deviceIndex = SDL_JoystickAttachVirtualEx(&desc);
++    if (deviceIndex < 0) {
++        SPDLOG_ERROR("[PS4] SDL_JoystickAttachVirtualEx failed: {}", SDL_GetError());
++        return;
++    }
++
++    sPadInstanceId = SDL_JoystickGetDeviceInstanceID(deviceIndex);
++    SPDLOG_INFO("[PS4] DualShock 4 attached as SDL joystick {} (instance {}, pad handle {})", deviceIndex,
++                (int)sPadInstanceId, sPadHandle);
++}
++
++} // namespace Ps4
++} // namespace Ship
++
++// imgui_impl_opengl3.cpp is compiled with glShaderSource redirected here: it always prepends a
++// "#version" line to its shaders, while the shaders known to compile on Piglet carry none.
++extern "C" void Ps4GlShaderSourceNoVersion(GLuint shader, GLsizei count, const GLchar* const* strings,
++                                           const GLint* lengths) {
++    const GLchar* filtered[8];
++    GLint filteredLengths[8];
++    GLsizei filteredCount = 0;
++
++    for (GLsizei i = 0; i < count && filteredCount < 8; i++) {
++        const GLchar* str = strings[i];
++        GLint length = (lengths != nullptr && lengths[i] >= 0) ? lengths[i] : (GLint)strlen(str);
++        if (length >= 8 && strncmp(str, "#version", 8) == 0) {
++            // Drop the directive line, keep whatever follows it in the same string.
++            const GLchar* lineEnd = (const GLchar*)memchr(str, '\n', (size_t)length);
++            if (lineEnd == nullptr) {
++                continue;
++            }
++            length -= (GLint)(lineEnd + 1 - str);
++            str = lineEnd + 1;
++        }
++        if (length <= 0) {
++            continue;
++        }
++        filtered[filteredCount] = str;
++        filteredLengths[filteredCount] = length;
++        filteredCount++;
++    }
++
++#undef glShaderSource
++    glShaderSource(shader, filteredCount, filtered, filteredLengths);
++}
++
++#endif // __PS4__
+diff --git a/src/ship/resource/archive/O2rArchive.cpp b/src/ship/resource/archive/O2rArchive.cpp
+index 13d97506..62081aa9 100644
+--- a/src/ship/resource/archive/O2rArchive.cpp
++++ b/src/ship/resource/archive/O2rArchive.cpp
+@@ -5,7 +5,70 @@
+ #include "spdlog/spdlog.h"
+ #include <unordered_map>
+ 
++#ifdef __PS4__
++#include <cerrno>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#endif
++
+ namespace Ship {
++#ifdef __PS4__
++// Fallback for when libzip can't work on the file itself: read the whole archive and let libzip
++// parse it from memory (it takes ownership of the buffer).
++static zip_t* Ps4OpenZipFromMemory(const std::string& path) {
++    FILE* file = fopen(path.c_str(), "rb");
++    if (file == nullptr) {
++        SPDLOG_ERROR("[PS4] fopen(\"{}\") failed: {}", path, strerror(errno));
++        return nullptr;
++    }
++
++    fseek(file, 0, SEEK_END);
++    const long size = ftell(file);
++    fseek(file, 0, SEEK_SET);
++    if (size <= 0) {
++        SPDLOG_ERROR("[PS4] \"{}\" reports a size of {} bytes", path, size);
++        fclose(file);
++        return nullptr;
++    }
++
++    void* data = malloc((size_t)size);
++    if (data == nullptr) {
++        SPDLOG_ERROR("[PS4] out of memory reading \"{}\" ({} bytes)", path, size);
++        fclose(file);
++        return nullptr;
++    }
++
++    const size_t bytesRead = fread(data, 1, (size_t)size, file);
++    fclose(file);
++    if (bytesRead != (size_t)size) {
++        SPDLOG_ERROR("[PS4] short read on \"{}\": {} of {} bytes", path, bytesRead, size);
++        free(data);
++        return nullptr;
++    }
++
++    zip_error_t error;
++    zip_error_init(&error);
++    zip_source_t* source = zip_source_buffer_create(data, (zip_uint64_t)size, 1, &error);
++    if (source == nullptr) {
++        SPDLOG_ERROR("[PS4] zip_source_buffer_create failed: {}", zip_error_strerror(&error));
++        free(data);
++        zip_error_fini(&error);
++        return nullptr;
++    }
++
++    zip_t* archive = zip_open_from_source(source, ZIP_RDONLY, &error);
++    if (archive == nullptr) {
++        SPDLOG_ERROR("[PS4] zip_open_from_source(\"{}\") failed: {}", path, zip_error_strerror(&error));
++        zip_source_free(source);
++    } else {
++        SPDLOG_INFO("[PS4] \"{}\" opened from memory ({} bytes)", path, size);
++    }
++    zip_error_fini(&error);
++    return archive;
++}
++#endif
++
+ O2rArchive::O2rArchive(const std::string& archivePath) : Archive(archivePath) {
+     mZipArchive = nullptr;
+ }
+@@ -95,7 +158,20 @@ std::shared_ptr<File> O2rArchive::LoadFile(const std::string& filePath) {
+ }
+ 
+ bool O2rArchive::Open() {
++#ifdef __PS4__
++    // Archives are never written on the console, and the one inside the package is on a read-only
++    // file system.
++    int zipError = 0;
++    errno = 0;
++    mZipArchive = zip_open(GetPath().c_str(), ZIP_RDONLY, &zipError);
++    if (mZipArchive == nullptr) {
++        SPDLOG_WARN("[PS4] zip_open(\"{}\") failed (libzip error {}, errno {}: {}), trying from memory", GetPath(),
++                    zipError, errno, strerror(errno));
++        mZipArchive = Ps4OpenZipFromMemory(GetPath());
++    }
++#else
+     mZipArchive = zip_open(GetPath().c_str(), ZIP_CREATE, nullptr);
++#endif
+     if (mZipArchive == nullptr) {
+         SPDLOG_ERROR("Failed to load zip file \"{}\"", GetPath());
+         return false;

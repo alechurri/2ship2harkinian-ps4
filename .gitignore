@@ -1,0 +1,7 @@
+build/
+prefix/
+deps/
+pkg/
+out*/
+release-pc/
+tmp/
