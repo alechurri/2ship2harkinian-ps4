@@ -65,7 +65,7 @@ Check them before copying, a damaged copy is the most common cause of the game n
 2. In FileZilla connect to that IP, port **2121**, with empty user name and password.
 3. Set *Transfer → Transfer type → Binary*. In automatic or text mode the `.sprx` files get
    corrupted. **Do not use WinSCP for the `.sprx` files.**
-4. Upload:
+4. Upload, all of them in **binary mode** (step 3.3):
    - `mm.o2r` → `/data/2ship/` (create the `2ship` folder inside `/data` if it does not exist)
    - both `.sprx` files → `/data/self/system/common/lib/` (create the folders if needed)
    - the `.pkg` → `/data/pkg/` (create it if needed), or put it on a USB drive instead

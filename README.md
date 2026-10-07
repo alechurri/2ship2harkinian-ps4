@@ -53,7 +53,7 @@ Full walkthrough: **[docs/INSTALL.md](docs/INSTALL.md)**. In short:
 
 1. Generate `mm.o2r` from your ROM with 2 Ship 2 Harkinian **5.0.1** on a PC.
 2. Copy `mm.o2r` to `/data/2ship/` and the two Piglet modules to `/data/self/system/common/lib/`
-   on the console over FTP.
+   on the console over FTP, in **binary mode** (other modes damage the files).
 3. Install the `.pkg` with GoldHEN's Package Installer and launch the game.
 
 ## Controls
