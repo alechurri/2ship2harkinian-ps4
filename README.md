@@ -21,7 +21,7 @@ Where everything lives:
 **None of this contains game assets or Sony binaries.** You need your own legally obtained ROM,
 and the two Piglet modules described in the install guide.
 
-> **Status: early.** Tested on one console only: PS4 Pro, firmware 12.52, GoldHEN, for about two
+> **Status: early.** Tested on one console only: PS4 Pro, firmware 12.02, GoldHEN, for about two
 > hours of play (title screen, intro, Clock Town and surroundings). Reports are welcome.
 
 ## What works

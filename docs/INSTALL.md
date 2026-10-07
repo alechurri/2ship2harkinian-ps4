@@ -3,7 +3,7 @@
 ## Requirements
 
 - A PS4 with a jailbreak that can install fake packages and run an FTP server. The port has only
-  been tested on a **PS4 Pro, firmware 12.52, with GoldHEN**.
+  been tested on a **PS4 Pro, firmware 12.02, with GoldHEN**.
 - A PC (Windows, Linux or macOS) to generate the game assets.
 - Your own *Majora's Mask* ROM, in a version 2 Ship 2 Harkinian supports (the US N64 release; the
   US GameCube release is also accepted by 2S2H).
@@ -85,6 +85,9 @@ Launch "2 Ship 2 Harkinian" from the home screen.
 - From the **second run** on, those shaders are compiled at boot, behind the system splash screen.
   The more you have played, the longer this takes (about 45 s after a couple of hours).
 - Press the **touchpad** to open the 2S2H menu.
+- Controls follow the N64 layout: **Cross = A, Circle = B, OPTIONS = Start** (Square and
+  Triangle are not A/B), L2 = Z, R2 = R, right stick = C buttons. Full table in the
+  [README](../README.md#controls); everything can be remapped from the menu.
 
 ## Files the game creates in `/data/2ship/`
 
